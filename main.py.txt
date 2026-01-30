@@ -5,61 +5,70 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
-from datetime import datetime, timedelta
+# import pandas_ta as ta  <-- 刪除這行，我們不依賴它了
+from datetime import datetime
 import pytz
 
-# --- 設定環境變數 (從 GitHub Secrets 讀取) ---
+# --- 設定環境變數 ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 LINE_TOKEN = os.environ.get("LINE_TOKEN")
-GROUP_ID = os.environ.get("GROUP_ID") # 你的群組 ID
+GROUP_ID = os.environ.get("GROUP_ID")
 
-# --- 自訂監控清單 ---
-# 你可以在這裡增減你想監控的股票代號
+# --- 設定 ---
 WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
-
-# --- 自訂新聞來源 (RSS) ---
 RSS_URLS = [
-    "https://www.cnbc.com/id/10000664/device/rss/rss.html", # CNBC Finance
-    "https://feeds.content.dowjones.com/public/rss/mw_topstories" # MarketWatch
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+    "https://feeds.content.dowjones.com/public/rss/mw_topstories"
 ]
 
+# --- 【新功能】自己算 RSI (不求人公式) ---
+def calculate_rsi(data, window=14):
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).fillna(0)
+    loss = (-delta.where(delta < 0, 0)).fillna(0)
+
+    # 使用 Wilder's Smoothing (標準 RSI 算法)
+    avg_gain = gain.ewm(com=window-1, min_periods=window).mean()
+    avg_loss = loss.ewm(com=window-1, min_periods=window).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def get_technical_analysis():
-    """分析監控清單，抓出買賣竭盡與大單訊號"""
     signals = []
     print("正在分析技術指標...")
     
     for ticker in WATCHLIST:
         try:
-            # 抓取資料 (日線)
-            df = yf.download(ticker, period="2mo", interval="1d", progress=False)
-            if len(df) < 14: continue 
+            # 抓取資料
+            df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+            if len(df) < 20: continue 
 
-            # 計算指標
-            # 1. RSI (相對強弱指標)
-            rsi = df.ta.rsi(length=14).iloc[-1]
+            # 手動計算指標
+            # 1. RSI
+            df['RSI'] = calculate_rsi(df['Close'])
+            rsi = df['RSI'].iloc[-1]
             
-            # 2. 成交量異動
+            # 2. 成交量
             current_vol = df['Volume'].iloc[-1]
             avg_vol = df['Volume'].rolling(window=5).mean().iloc[-1]
             vol_ratio = float(current_vol) / float(avg_vol) if float(avg_vol) > 0 else 1.0
 
-            # --- 判斷邏輯 ---
+            # 判斷訊號
             ticker_signals = []
             
-            # A. 買盤竭盡 (RSI > 75)
+            # 避免 RSI 是 NaN (資料不足時)
+            if pd.isna(rsi): continue
+
             if rsi > 75:
                 ticker_signals.append(f"⚠️ 買盤竭盡 (RSI {rsi:.0f})")
-            
-            # B. 賣盤竭盡 (RSI < 25)
             elif rsi < 25:
                 ticker_signals.append(f"💎 賣盤竭盡 (RSI {rsi:.0f})")
                 
-            # C. 大單灌入 (成交量 > 5日均量 2倍)
             if vol_ratio > 2.0:
                 ticker_signals.append(f"🔥 大單灌入 (量增 {vol_ratio:.1f}倍)")
 
-            # 如果有任何訊號，就加入報告
             if ticker_signals:
                 signals.append(f"【{ticker}】: {' '.join(ticker_signals)}")
 
@@ -72,24 +81,20 @@ def get_technical_analysis():
     return "\n".join(signals)
 
 def get_news():
-    """抓取 RSS 新聞摘要"""
     news_content = ""
     print("正在抓取新聞...")
     try:
         for url in RSS_URLS:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:3]: # 每個來源取前 3 則
+            for entry in feed.entries[:3]:
                 news_content += f"- {entry.title}\n"
     except Exception as e:
         print(f"抓新聞錯誤: {e}")
     return news_content
 
 def generate_report():
-    """整合資料並用 AI 寫報告"""
     raw_news = get_news()
     tech_signals = get_technical_analysis()
-    
-    # 台灣時間
     tw_time = datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y/%m/%d')
 
     print("呼叫 Gemini 分析中...")
@@ -106,28 +111,21 @@ def generate_report():
     {tech_signals}
     
     ---
-    請以「繁體中文」撰寫，語氣專業、簡潔，適合手機閱讀。
-    格式如下（請嚴格遵守）：
+    請以「繁體中文」撰寫，語氣專業、簡潔。
+    格式如下：
     
     📊 **美股晨間戰報** ({tw_time})
     
-    **1. 市場風向**：(用一句話總結昨日美股情緒，如恐慌、觀望或貪婪)
-    
-    **2. 焦點新聞**：
-    (從資料 A 挑選 2 則最重要的新聞，並一句話解釋對股市的影響)
-    
-    **3. 技術面異常 (重點)**：
-    (整理資料 B 的內容。若有出現「買盤竭盡」提示風險；若有「賣盤竭盡」提示機會；若有「大單」提示關注。若無訊號則寫「觀察名單走勢平穩」。)
-    
-    **4. 操作建議**：(給散戶的一句話建議)
+    **1. 市場風向**：(一句話總結)
+    **2. 焦點新聞**：(挑選 2 則並解讀)
+    **3. 技術面異常**：(整理資料 B，若無則寫觀察名單平穩)
+    **4. 操作建議**：(一句話建議)
     """
     
     response = model.generate_content(prompt)
     return response.text
 
 def send_line_push(content):
-    """推播到群組"""
-    print("準備發送 LINE...")
     line_bot_api = LineBotApi(LINE_TOKEN)
     line_bot_api.push_message(GROUP_ID, TextSendMessage(text=content))
 
