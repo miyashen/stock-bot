@@ -3,4 +3,3 @@ google-generativeai
 line-bot-sdk
 yfinance
 pandas
-pandas_ta
