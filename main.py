@@ -14,14 +14,19 @@ LINE_TOKEN = os.environ.get("LINE_TOKEN", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "").strip()
 
 # --- 設定監控清單 ---
-# 美股監控
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 
-# --- 新聞來源 (新增台灣鉅亨網) ---
+# --- 新聞來源 (新增名師追蹤) ---
 RSS_URLS = [
-    "https://www.cnbc.com/id/10000664/device/rss/rss.html",       # 美股財經
-    "https://feeds.content.dowjones.com/public/rss/mw_topstories", # MarketWatch
-    "https://news.cnyes.com/rss/cat/tw_stock"                     # 台股鉅亨網
+    # 1. 國際財經
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+    "https://feeds.content.dowjones.com/public/rss/mw_topstories",
+    # 2. 台股新聞 (鉅亨網)
+    "https://news.cnyes.com/rss/cat/tw_stock",
+    # 3. 名師與機構 (使用 Google News 關鍵字追蹤)
+    "https://news.google.com/rss/search?q=張震+股市&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+    "https://news.google.com/rss/search?q=萬寶投顧&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+    "https://news.google.com/rss/search?q=先探&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 ]
 
 def calculate_rsi(data, window=14):
@@ -35,12 +40,11 @@ def calculate_rsi(data, window=14):
     return rsi
 
 def get_market_data():
-    """抓取美股監控 + 台股大盤資訊"""
     signals = []
     tw_summary = ""
     print("正在分析市場數據...")
     
-    # 1. 分析美股個股
+    # 1. 美股技術分析
     for ticker in US_WATCHLIST:
         try:
             df = yf.download(ticker, period="3mo", interval="1d", progress=False)
@@ -68,17 +72,20 @@ def get_market_data():
             print(f"分析 {ticker} 失敗: {e}")
             continue
 
-    # 2. 抓取台股大盤 (加權指數) 昨收資訊
+    # 2. 台股大盤
     try:
         twii = yf.download("^TWII", period="5d", progress=False)
         if isinstance(twii.columns, pd.MultiIndex):
             twii.columns = twii.columns.get_level_values(0)
-            
-        close_price = twii['Close'].iloc[-1]
-        change = twii['Close'].iloc[-1] - twii['Close'].iloc[-2]
-        pct_change = (change / twii['Close'].iloc[-2]) * 100
         
-        tw_summary = f"台股加權指數昨收 {close_price:.0f} 點，漲跌 {change:+.0f} 點 ({pct_change:+.2f}%)"
+        if len(twii) >= 2:
+            close_price = twii['Close'].iloc[-1]
+            change = twii['Close'].iloc[-1] - twii['Close'].iloc[-2]
+            pct_change = (change / twii['Close'].iloc[-2]) * 100
+            tw_summary = f"台股加權指數昨收 {close_price:.0f} 點，漲跌 {change:+.0f} 點 ({pct_change:+.2f}%)"
+        else:
+            tw_summary = "台股大盤資料不足"
+            
     except Exception as e:
         tw_summary = "無法取得台股大盤數據"
         print(f"台股抓取失敗: {e}")
@@ -88,12 +95,12 @@ def get_market_data():
 
 def get_news():
     news_content = ""
-    print("正在抓取全球與台股新聞...")
+    print("正在抓取新聞與名師觀點...")
     try:
         for url in RSS_URLS:
             feed = feedparser.parse(url)
-            # 每個來源抓前 4 則，增加資訊量
-            for entry in feed.entries[:4]: 
+            # 每個來源抓前 3 則，名師的新聞通常比較少，這樣可以確保抓到最新的
+            for entry in feed.entries[:3]: 
                 news_content += f"- {entry.title}\n"
     except Exception as e:
         print(f"抓新聞錯誤: {e}")
@@ -110,40 +117,41 @@ def generate_report():
 
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # 使用你最強的 gemini-2.5-flash
+    # 使用最強的 gemini-2.5-flash
     model = genai.GenerativeModel('gemini-2.5-flash')
     
     prompt = f"""
-    你是一位精通台美股連動的資深分析師。請根據以下資料，撰寫一份給台灣投資人的「每日晨間戰報」。
+    你是一位精通「籌碼分析」與「技術面」的台股資深操盤手。請撰寫一份戰報。
 
-    【資料 A：昨日台股大盤】
-    {tw_market_info}
+    【資料來源】
+    A. 台股昨日大盤：{tw_market_info}
+    B. 美股異常訊號：{us_tech_signals}
+    C. 市場新聞與名師觀點：{raw_news}
 
-    【資料 B：美股技術面異常訊號】
-    {us_tech_signals}
-
-    【資料 C：全球與台股最新新聞標題】
-    {raw_news}
+    【任務重點】
+    請特別從「資料 C」中搜尋以下關鍵字的相關看法，並整合在報告中：
+    1. **張震 (股市MBA)**：通常強調技術型態與位階。
+    2. **萬寶投顧**：通常分析主力籌碼與熱門題材。
+    3. **先探財訊**：通常深入產業趨勢。
 
     ---
-    **撰寫規則 (請嚴格遵守)：**
-    1. **繁體中文**撰寫，語氣專業、簡潔、有洞見。
-    2. **台美連動分析**：請根據美股昨晚表現 (如 NVDA 漲跌)，推論今日台股相關族群 (如 AI 概念股) 的可能走勢。
-    3. 格式如下：
+    **戰報格式 (請繁體中文撰寫)：**
 
-    📊 **台美股晨間戰報** ({tw_time})
+    📊 **台美股戰報** ({tw_time})
 
-    **1. 昨日台股回顧**：
-    (簡短總結昨日加權指數表現與強勢族群)
+    **1. 盤勢重點**：
+    (結合台股大盤 {tw_market_info} 與美股氣氛，給出一句定調)
 
-    **2. 美股隔夜風向**：
-    (總結美股氣氛，並列出【資料 B】中有出現異常訊號的股票，若無則寫觀望)
+    **2. 名師與機構觀點 (精華)**：
+    * **張震/技術面**：(若有相關新聞，總結他的看法；若無，請省略)
+    * **萬寶/籌碼面**：(若有相關新聞，總結看好哪些族群；若無，請省略)
+    * **先探/產業面**：(若有相關新聞，提煉產業重點；若無，請省略)
 
-    **3. 今日台股看點 (重點)**：
-    (結合美股走勢與新聞，分析今日台股該注意的「板塊」或「產業」。例如：美股科技股大跌，今日台股電子股恐承壓...)
+    **3. 今日焦點族群**：
+    (根據美股表現與上述名師觀點，點名今日可留意的板塊)
 
-    **4. 操作建議**：
-    (給散戶的一句話策略，例如：短線勿追高、留意低接機會等)
+    **4. 操盤錦囊**：
+    (給散戶的一個具體操作建議)
     """
     
     response = model.generate_content(prompt)
