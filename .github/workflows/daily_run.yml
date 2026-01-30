@@ -1,0 +1,33 @@
+name: Daily US Stock Report
+
+on:
+  schedule:
+    # GitHub 是 UTC 時間。台灣早上 7:00 = UTC 23:00 (前一天)
+    # 格式: 分 時 日 月 週
+    - cron: '0 23 * * *'
+  
+  # 讓你也可以手動按按鈕測試
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install libraries
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+          GROUP_ID: ${{ secrets.GROUP_ID }}
+        run: python main.py
