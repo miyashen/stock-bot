@@ -102,7 +102,7 @@ def generate_report():
         raise ValueError("GitHub Secrets 沒有成功傳遞 GEMINI_API_KEY，請檢查 .yml 檔")
 
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-pro')
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
     你是華爾街資深交易員。請根據以下資料，為 LINE 群組撰寫一份「美股晨間戰報」。
@@ -139,3 +139,4 @@ if __name__ == "__main__":
         print("發送成功！")
     except Exception as e:
         print(f"執行失敗: {e}")
+
