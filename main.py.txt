@@ -1,0 +1,140 @@
+import os
+import feedparser
+import google.generativeai as genai
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
+import yfinance as yf
+import pandas as pd
+import pandas_ta as ta
+from datetime import datetime, timedelta
+import pytz
+
+# --- 設定環境變數 (從 GitHub Secrets 讀取) ---
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+LINE_TOKEN = os.environ.get("LINE_TOKEN")
+GROUP_ID = os.environ.get("GROUP_ID") # 你的群組 ID
+
+# --- 自訂監控清單 ---
+# 你可以在這裡增減你想監控的股票代號
+WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
+
+# --- 自訂新聞來源 (RSS) ---
+RSS_URLS = [
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html", # CNBC Finance
+    "https://feeds.content.dowjones.com/public/rss/mw_topstories" # MarketWatch
+]
+
+def get_technical_analysis():
+    """分析監控清單，抓出買賣竭盡與大單訊號"""
+    signals = []
+    print("正在分析技術指標...")
+    
+    for ticker in WATCHLIST:
+        try:
+            # 抓取資料 (日線)
+            df = yf.download(ticker, period="2mo", interval="1d", progress=False)
+            if len(df) < 14: continue 
+
+            # 計算指標
+            # 1. RSI (相對強弱指標)
+            rsi = df.ta.rsi(length=14).iloc[-1]
+            
+            # 2. 成交量異動
+            current_vol = df['Volume'].iloc[-1]
+            avg_vol = df['Volume'].rolling(window=5).mean().iloc[-1]
+            vol_ratio = float(current_vol) / float(avg_vol) if float(avg_vol) > 0 else 1.0
+
+            # --- 判斷邏輯 ---
+            ticker_signals = []
+            
+            # A. 買盤竭盡 (RSI > 75)
+            if rsi > 75:
+                ticker_signals.append(f"⚠️ 買盤竭盡 (RSI {rsi:.0f})")
+            
+            # B. 賣盤竭盡 (RSI < 25)
+            elif rsi < 25:
+                ticker_signals.append(f"💎 賣盤竭盡 (RSI {rsi:.0f})")
+                
+            # C. 大單灌入 (成交量 > 5日均量 2倍)
+            if vol_ratio > 2.0:
+                ticker_signals.append(f"🔥 大單灌入 (量增 {vol_ratio:.1f}倍)")
+
+            # 如果有任何訊號，就加入報告
+            if ticker_signals:
+                signals.append(f"【{ticker}】: {' '.join(ticker_signals)}")
+
+        except Exception as e:
+            print(f"分析 {ticker} 失敗: {e}")
+            continue
+
+    if not signals:
+        return "今日監控名單籌碼穩定，無特殊異常訊號。"
+    return "\n".join(signals)
+
+def get_news():
+    """抓取 RSS 新聞摘要"""
+    news_content = ""
+    print("正在抓取新聞...")
+    try:
+        for url in RSS_URLS:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:3]: # 每個來源取前 3 則
+                news_content += f"- {entry.title}\n"
+    except Exception as e:
+        print(f"抓新聞錯誤: {e}")
+    return news_content
+
+def generate_report():
+    """整合資料並用 AI 寫報告"""
+    raw_news = get_news()
+    tech_signals = get_technical_analysis()
+    
+    # 台灣時間
+    tw_time = datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y/%m/%d')
+
+    print("呼叫 Gemini 分析中...")
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-pro')
+    
+    prompt = f"""
+    你是華爾街資深交易員。請根據以下資料，為 LINE 群組撰寫一份「美股晨間戰報」。
+    
+    【資料 A：昨晚重點新聞標題】
+    {raw_news}
+    
+    【資料 B：技術面監控訊號 (RSI/爆量)】
+    {tech_signals}
+    
+    ---
+    請以「繁體中文」撰寫，語氣專業、簡潔，適合手機閱讀。
+    格式如下（請嚴格遵守）：
+    
+    📊 **美股晨間戰報** ({tw_time})
+    
+    **1. 市場風向**：(用一句話總結昨日美股情緒，如恐慌、觀望或貪婪)
+    
+    **2. 焦點新聞**：
+    (從資料 A 挑選 2 則最重要的新聞，並一句話解釋對股市的影響)
+    
+    **3. 技術面異常 (重點)**：
+    (整理資料 B 的內容。若有出現「買盤竭盡」提示風險；若有「賣盤竭盡」提示機會；若有「大單」提示關注。若無訊號則寫「觀察名單走勢平穩」。)
+    
+    **4. 操作建議**：(給散戶的一句話建議)
+    """
+    
+    response = model.generate_content(prompt)
+    return response.text
+
+def send_line_push(content):
+    """推播到群組"""
+    print("準備發送 LINE...")
+    line_bot_api = LineBotApi(LINE_TOKEN)
+    line_bot_api.push_message(GROUP_ID, TextSendMessage(text=content))
+
+if __name__ == "__main__":
+    try:
+        report = generate_report()
+        send_line_push(report)
+        print("發送成功！")
+    except Exception as e:
+        print(f"執行失敗: {e}")
