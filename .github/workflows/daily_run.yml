@@ -23,8 +23,9 @@ jobs:
 
       - name: Run Bot
         # 👇【原本缺少的關鍵部分】👇
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+       env:
+          # 左邊 (給 Python 看的) 不動 : 右邊 (保險箱名字) 改成你設定的 GOOGLEGEMINIAPI_KEY
+          GEMINI_API_KEY: ${{ secrets.GOOGLEGEMINIAPI_KEY }}
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           GROUP_ID: ${{ secrets.GROUP_ID }}
         # 👆【補上這段，機器人才拿得到鑰匙】👆
