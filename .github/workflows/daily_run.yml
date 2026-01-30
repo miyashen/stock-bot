@@ -2,8 +2,8 @@ name: Daily US Stock Report
 
 on:
   schedule:
-    - cron: '0 23 * * *' # 台灣時間早上 7 點
-  workflow_dispatch:      # 允許手動按按鈕
+    - cron: '0 23 * * *'
+  workflow_dispatch:      # 👈 這行就是讓按鈕出現的關鍵
 
 jobs:
   build:
@@ -15,18 +15,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # 使用 3.11 避免舊版問題
+          python-version: '3.11'
 
       - name: Install libraries
         run: |
           pip install -r requirements.txt
 
       - name: Run Bot
-        # 👇【原本缺少的關鍵部分】👇
-       env:
-          # 左邊 (給 Python 看的) 不動 : 右邊 (保險箱名字) 改成你設定的 GOOGLEGEMINIAPI_KEY
+        env:
+          # 左邊不動 : 右邊是你剛剛確認過的正確鑰匙名
           GEMINI_API_KEY: ${{ secrets.GOOGLEGEMINIAPI_KEY }}
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           GROUP_ID: ${{ secrets.GROUP_ID }}
-        # 👆【補上這段，機器人才拿得到鑰匙】👆
         run: python main.py
