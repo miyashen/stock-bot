@@ -16,17 +16,18 @@ GROUP_ID = os.environ.get("GROUP_ID", "").strip()
 # --- 設定監控清單 ---
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 
-# --- 新聞來源 (新增名師追蹤) ---
+# --- 新聞來源 (新增時間過濾參數) ---
+# 關鍵修改：在搜尋連結後加上 "when:1d" (限定24小時內)，確保不抓到舊聞
 RSS_URLS = [
     # 1. 國際財經
     "https://www.cnbc.com/id/10000664/device/rss/rss.html",
     "https://feeds.content.dowjones.com/public/rss/mw_topstories",
-    # 2. 台股新聞 (鉅亨網)
+    # 2. 台股新聞
     "https://news.cnyes.com/rss/cat/tw_stock",
-    # 3. 名師與機構 (使用 Google News 關鍵字追蹤)
-    "https://news.google.com/rss/search?q=張震+股市&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
-    "https://news.google.com/rss/search?q=萬寶投顧&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
-    "https://news.google.com/rss/search?q=先探&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    # 3. 名師觀點 (強制限定 1 天內的新聞)
+    "https://news.google.com/rss/search?q=張震+股市+when:1d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+    "https://news.google.com/rss/search?q=萬寶投顧+when:1d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+    "https://news.google.com/rss/search?q=先探+when:1d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 ]
 
 def calculate_rsi(data, window=14):
@@ -99,9 +100,11 @@ def get_news():
     try:
         for url in RSS_URLS:
             feed = feedparser.parse(url)
-            # 每個來源抓前 3 則，名師的新聞通常比較少，這樣可以確保抓到最新的
+            # 每個來源抓前 3 則
             for entry in feed.entries[:3]: 
-                news_content += f"- {entry.title}\n"
+                # 簡單過濾：如果標題太短或看起來像無效連結，則不抓
+                if len(entry.title) > 5:
+                    news_content += f"- {entry.title}\n"
     except Exception as e:
         print(f"抓新聞錯誤: {e}")
     return news_content
@@ -117,22 +120,22 @@ def generate_report():
 
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # 使用最強的 gemini-2.5-flash
     model = genai.GenerativeModel('gemini-2.5-flash')
     
     prompt = f"""
-    你是一位精通「籌碼分析」與「技術面」的台股資深操盤手。請撰寫一份戰報。
+    你是一位嚴謹的台股資深分析師。請撰寫戰報。
 
     【資料來源】
     A. 台股昨日大盤：{tw_market_info}
     B. 美股異常訊號：{us_tech_signals}
     C. 市場新聞與名師觀點：{raw_news}
 
-    【任務重點】
-    請特別從「資料 C」中搜尋以下關鍵字的相關看法，並整合在報告中：
-    1. **張震 (股市MBA)**：通常強調技術型態與位階。
-    2. **萬寶投顧**：通常分析主力籌碼與熱門題材。
-    3. **先探財訊**：通常深入產業趨勢。
+    【關鍵任務：名師觀點過濾】
+    請仔細檢查「資料 C」，從中尋找「張震」、「萬寶投顧」、「先探」的最新看法。
+    ⚠️ **重要過濾規則：**
+    1. **只採信**：明確提到該分析師對「後市看法」、「個股分析」或「技術解盤」的內容。
+    2. **不採信**：如果新聞只是廣告、課程推銷、或標題提到名字但內容無關，請直接忽略，並標註「今日無特殊觀點」。
+    3. **嚴禁瞎掰**：如果找不到相關資訊，請誠實寫「無」。
 
     ---
     **戰報格式 (請繁體中文撰寫)：**
@@ -140,18 +143,18 @@ def generate_report():
     📊 **台美股戰報** ({tw_time})
 
     **1. 盤勢重點**：
-    (結合台股大盤 {tw_market_info} 與美股氣氛，給出一句定調)
+    (結合台股 {tw_market_info} 與美股氣氛，一句話定調)
 
-    **2. 名師與機構觀點 (精華)**：
-    * **張震/技術面**：(若有相關新聞，總結他的看法；若無，請省略)
-    * **萬寶/籌碼面**：(若有相關新聞，總結看好哪些族群；若無，請省略)
-    * **先探/產業面**：(若有相關新聞，提煉產業重點；若無，請省略)
+    **2. 名師與機構觀點 (精選)**：
+    * **張震 (股市MBA)**：(請分析其對位階或型態的看法，若無相關新聞請寫「今日無更新」)
+    * **萬寶投顧**：(請摘要其看好的題材或籌碼分析，若無請寫「今日無更新」)
+    * **先探財訊**：(請摘要產業趨勢重點，若無請寫「今日無更新」)
 
     **3. 今日焦點族群**：
-    (根據美股表現與上述名師觀點，點名今日可留意的板塊)
+    (點名今日可留意的板塊)
 
     **4. 操盤錦囊**：
-    (給散戶的一個具體操作建議)
+    (給散戶的操作建議)
     """
     
     response = model.generate_content(prompt)
