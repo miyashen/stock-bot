@@ -3,5 +3,3 @@ feedparser
 line-bot-sdk
 yfinance
 pandas
-yt-dlp
-youtube-transcript-api
