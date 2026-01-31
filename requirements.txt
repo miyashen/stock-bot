@@ -3,3 +3,4 @@ feedparser
 line-bot-sdk
 yfinance
 pandas
+requests
