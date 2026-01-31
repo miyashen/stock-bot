@@ -2,8 +2,8 @@ name: Daily US Stock Report
 
 on:
   schedule:
-    - cron: '0 23 * * *'
-  workflow_dispatch:      # 👈 這行就是讓按鈕出現的關鍵
+    - cron: '0 23 * * *' # 台灣時間早上 7 點執行
+  workflow_dispatch:      # 允許手動按按鈕執行
 
 jobs:
   build:
@@ -16,16 +16,8 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      # 👇【新增這一段】安裝 FFmpeg 影音工具
+      # 👇 這是你要新增的 FFmpeg 安裝步驟 (Linux 指令)
       - name: Install FFmpeg
         run: |
           sudo apt-get update
@@ -35,13 +27,9 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Install libraries
-        run: |
-          pip install -r requirements.txt
-
       - name: Run Bot
         env:
-          # 左邊不動 : 右邊是你剛剛確認過的正確鑰匙名
+          # 左邊是程式碼用的變數 : 右邊是 GitHub Secrets 的名字
           GEMINI_API_KEY: ${{ secrets.GOOGLEGEMINIAPI_KEY }}
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           GROUP_ID: ${{ secrets.GROUP_ID }}
