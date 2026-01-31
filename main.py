@@ -9,6 +9,10 @@ from datetime import datetime
 import pytz
 import time
 
+# --- 新增的 YouTube 相關套件 ---
+from youtubesearchpython import VideosSearch
+from youtube_transcript_api import YouTubeTranscriptApi
+
 # --- 設定環境變數 ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 LINE_TOKEN = os.environ.get("LINE_TOKEN", "").strip()
@@ -17,11 +21,7 @@ GROUP_ID = os.environ.get("GROUP_ID", "").strip()
 # ==========================================
 # 🔴 第一部分：原有的台美股戰報 (保持不變)
 # ==========================================
-
-# --- 監控清單 ---
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
-
-# --- 台美股新聞來源 ---
 MARKET_RSS_URLS = [
     "https://www.cnbc.com/id/10000664/device/rss/rss.html",
     "https://feeds.content.dowjones.com/public/rss/mw_topstories",
@@ -46,36 +46,29 @@ def get_market_data():
     tw_summary = ""
     print("正在分析市場數據 (第一戰報)...")
     
-    # 1. 美股
     for ticker in US_WATCHLIST:
         try:
             df = yf.download(ticker, period="3mo", interval="1d", progress=False)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             if len(df) < 20: continue 
-
             df['RSI'] = calculate_rsi(df['Close'])
             rsi = float(df['RSI'].iloc[-1]) if not pd.isna(df['RSI'].iloc[-1]) else 50
-            
             current_vol = float(df['Volume'].iloc[-1])
             avg_vol = float(df['Volume'].rolling(window=5).mean().iloc[-1])
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
-
             ticker_signals = []
             if rsi > 75: ticker_signals.append(f"⚠️過熱(RSI{rsi:.0f})")
             elif rsi < 25: ticker_signals.append(f"💎超跌(RSI{rsi:.0f})")
             if vol_ratio > 2.0: ticker_signals.append(f"🔥爆量({vol_ratio:.1f}倍)")
-
             if ticker_signals:
                 signals.append(f"{ticker}: {' '.join(ticker_signals)}")
         except: continue
 
-    # 2. 台股
     try:
         twii = yf.download("^TWII", period="5d", progress=False)
         if isinstance(twii.columns, pd.MultiIndex):
             twii.columns = twii.columns.get_level_values(0)
-        
         if len(twii) >= 2:
             change = twii['Close'].iloc[-1] - twii['Close'].iloc[-2]
             pct_change = (change / twii['Close'].iloc[-2]) * 100
@@ -100,18 +93,14 @@ def generate_stock_report():
     raw_news = get_market_news()
     us_signals, tw_info = get_market_data()
     tw_time = datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y/%m/%d')
-    
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
-    
     prompt = f"""
     你是嚴謹的台股分析師。請撰寫戰報。
     資料A: {tw_info}
     資料B: {us_signals}
     資料C: {raw_news}
-
-    請特別過濾資料C中「張震、萬寶、先探」的觀點。
-    
+    請過濾張震、萬寶、先探觀點。
     格式:
     📊 **台美股戰報** ({tw_time})
     **1. 盤勢重點**: (一句話)
@@ -125,113 +114,143 @@ def generate_stock_report():
     return model.generate_content(prompt).text
 
 # ==========================================
-# 🔵 第二部分：新增「理財達人秀」專屬總結
+# 🔵 第二部分：理財達人秀 (YouTube 字幕分析版)
 # ==========================================
 
-# --- 達人秀專屬追蹤源 ---
-SHOW_RSS_URLS = [
-    # 追蹤節目本身的標題 (YouTube & Google News)
-    "https://news.google.com/rss/search?q=理財達人秀+when:1d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
-    # 追蹤特定人物 (加上 '股市' 避免抓到同名同姓)
-    "https://news.google.com/rss/search?q=李兆華+股市+when:1d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
-    "https://news.google.com/rss/search?q=權證小哥+when:1d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
-    "https://news.google.com/rss/search?q=艾倫+股市+when:1d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-]
-
-def get_show_news():
-    content = ""
-    print("正在抓取理財達人秀資訊...")
+def get_youtube_transcript():
+    """搜尋理財達人秀最新影片並抓取字幕"""
+    print("正在搜尋 YouTube 最新影片...")
+    transcript_text = ""
+    video_title = ""
+    video_url = ""
+    
     try:
-        for url in SHOW_RSS_URLS:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:3]: # 每個關鍵字抓前3則
-                if len(entry.title) > 5:
-                    content += f"- {entry.title}\n"
+        # 1. 搜尋最新的一集
+        videosSearch = VideosSearch('理財達人秀', limit = 1)
+        result = videosSearch.result()
+        
+        if not result['result']:
+            return None, None, "找不到影片"
+            
+        video_info = result['result'][0]
+        video_id = video_info['id']
+        video_title = video_info['title']
+        video_url = video_info['link']
+        
+        print(f"找到影片: {video_title}")
+        
+        # 2. 抓取字幕 (嘗試繁體中文，如果沒有則抓自動產生的)
+        try:
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['zh-TW', 'zh-Hant', 'zh'])
+        except:
+            # 如果沒有標準中文，嘗試抓取所有可用字幕
+            try:
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            except Exception as e:
+                print(f"無法取得字幕: {e}")
+                return None, video_title, "本集無字幕可供分析"
+
+        # 3. 組合字幕文字
+        full_text = " ".join([t['text'] for t in transcript_list])
+        
+        # 限制長度以免超過 Token 上限 (取前 25000 字通常夠了)
+        return full_text[:25000], video_title, video_url
+
     except Exception as e:
-        print(f"抓取達人秀失敗: {e}")
-    return content
+        print(f"YouTube 處理失敗: {e}")
+        return None, None, None
 
 def generate_show_report():
-    raw_data = get_show_news()
+    # 取得字幕
+    transcript, title, url = get_youtube_transcript()
     
-    # 如果完全沒抓到資料 (可能週末沒錄影)，就回傳 None，避免發送空訊息
-    if not raw_data:
-        print("今日無達人秀相關新聞，跳過發送。")
+    if not transcript:
+        print("今日無有效字幕資料，跳過。")
         return None
 
-    print("呼叫 Gemini 分析達人秀...")
+    print("呼叫 Gemini 閱讀字幕中...")
     genai.configure(api_key=GEMINI_API_KEY)
+    # 使用 2.5-flash，它的 Context Window 很大，可以吃下整集字幕
     model = genai.GenerativeModel('gemini-2.5-flash')
     
     prompt = f"""
-    你是一位「理財達人秀」的忠實觀眾與筆記整理者。請根據以下網路上抓取的最新節目相關資訊，整理昨日精華。
+    你是一位專業的財經節目筆記整理者。請閱讀以下「理財達人秀」的完整節目逐字稿，整理出精華重點。
 
-    【擷取資訊】
-    {raw_data}
+    【節目資訊】
+    標題：{title}
+    連結：{url}
 
+    【逐字稿內容 (部分)】
+    {transcript}
+
+    ---
     【任務目標】
-    請針對「李兆華 (主持人)」、「權證小哥」、「艾倫」這三位關鍵人物進行分析。
+    請根據逐字稿內容，深度分析以下來賓的觀點。如果逐字稿中沒有明確標示人名，請根據對話內容推測（通常李兆華是主持人，負責提問）。
     
-    ⚠️ **注意事項**：
-    1. 若資訊中包含該人物的具體分析（如小哥的籌碼、艾倫的產業），請重點摘要。
-    2. 若某位達人今日無相關資訊，請該欄位留白或寫「今日無重點」，**不要瞎掰**。
-    3. 語氣要像節目小編，輕鬆但有重點。
+    1. **權證小哥**：專注於「籌碼動向」、「主力進出」、「分點券商」或「特殊技術型態」。
+    2. **艾倫 (Allen)**：專注於「產業趨勢」、「基本面」或「個股題材」。
+    3. **李兆華**：整理她強調的今日市場氛圍或總結。
+
+    ⚠️ **嚴格規定**：
+    * **必須有乾貨**：不要寫「小哥分析了股市」，要寫「小哥指出XX股票主力大買...」。
+    * **如果某人沒來**：如果整篇稿子都沒出現某位達人，請誠實標註「本集未出席」。
+    * **不要瞎掰**：只根據逐字稿內容撰寫。
 
     ---
     **格式如下 (繁體中文)**：
 
     📺 **理財達人秀：昨日精華筆記**
-
-    🔥 **本集熱門主題**：
-    (根據標題總結昨日討論重點，例如：AI復活? 航運噴出?)
+    ({title})
 
     💡 **達人觀點透視**：
-    🔹 **權證小哥**：(專注籌碼/技術面分析)
-    🔹 **艾倫分析師**：(專注產業/個股分析)
-    🔹 **李兆華**：(主持人觀點或總結)
+    🔹 **權證小哥**：
+    (請列出具體分析，例如看好的個股、觀察到的籌碼異常)
+    
+    🔹 **艾倫分析師**：
+    (請列出看好的產業或個股理由)
+    
+    🔹 **李兆華 (總結)**：
+    (本集核心結論)
 
-    📝 **重點總結**：
-    (一句話總結昨日節目的核心結論)
+    🔗 **觀看連結**：{url}
     """
     
     try:
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        print(f"達人秀分析失敗: {e}")
+        print(f"分析失敗: {e}")
         return None
 
 # ==========================================
-# 🚀 主程式：依序執行兩個任務
+# 🚀 主程式
 # ==========================================
-
 def send_line_push(content):
     line_bot_api = LineBotApi(LINE_TOKEN)
     line_bot_api.push_message(GROUP_ID, TextSendMessage(text=content))
 
 if __name__ == "__main__":
-    # --- 任務 1：發送原本的台美股戰報 ---
+    # --- 任務 1：台美股戰報 ---
     try:
-        print("--- 開始執行任務 1：台美股戰報 ---")
+        print("--- 任務 1：台美股戰報 ---")
         report1 = generate_stock_report()
         send_line_push(report1)
-        print("✅ 第一則戰報發送成功！")
+        print("✅ 戰報發送成功！")
     except Exception as e:
-        print(f"❌ 第一則戰報失敗: {e}")
+        print(f"❌ 戰報失敗: {e}")
 
-    # 休息 3 秒，避免訊息黏在一起，或 API 請求太快
-    time.sleep(3)
+    time.sleep(5) # 休息一下
 
-    # --- 任務 2：發送理財達人秀戰報 ---
+    # --- 任務 2：達人秀字幕分析 ---
     try:
-        print("--- 開始執行任務 2：理財達人秀 ---")
+        print("--- 任務 2：理財達人秀 (字幕版) ---")
         report2 = generate_show_report()
         
-        if report2: # 只有在有內容時才發送
+        if report2:
             send_line_push(report2)
-            print("✅ 第二則戰報 (達人秀) 發送成功！")
+            print("✅ 達人秀筆記發送成功！")
         else:
-            print("⚠️ 今日無達人秀內容，跳過發送。")
+            print("⚠️ 無法產生達人秀筆記 (可能無字幕或無影片)")
             
     except Exception as e:
-        print(f"❌ 第二則戰報失敗: {e}")
+        print(f"❌ 達人秀失敗: {e}")
