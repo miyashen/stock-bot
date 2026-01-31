@@ -5,11 +5,9 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import time
-import json
-import yt_dlp
 
 # --- 設定環境變數 ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -17,7 +15,7 @@ LINE_TOKEN = os.environ.get("LINE_TOKEN", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "").strip()
 
 # ==========================================
-# 🔴 第一部分：台美股戰報 (保持不變)
+# 🔴 第一部分：台美股戰報 (維持不變)
 # ==========================================
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 MARKET_RSS_URLS = [
@@ -109,139 +107,76 @@ def generate_stock_report():
     return model.generate_content(prompt).text
 
 # ==========================================
-# 🔵 第二部分：理財達人秀 (音訊分析版 🎧)
+# 🔵 第二部分：理財達人秀 (Google 搜尋工具版 🔍)
 # ==========================================
 
-def download_audio():
-    """下載最新一集影片的音軌 (MP3)"""
-    print("🎧 正在搜尋並下載理財達人秀音檔...")
+def generate_show_report_via_search():
+    print("🔍 啟動 Google 搜尋引擎，搜尋最新節目資訊...")
     
-    # 目標：理財達人秀官方頻道的最新影片
-    TARGET_URL = "https://www.youtube.com/@moneymaker48/videos"
-    OUTPUT_FILENAME = "show_audio.mp3"
-
-    # 清理舊檔案
-    if os.path.exists(OUTPUT_FILENAME):
-        os.remove(OUTPUT_FILENAME)
-
-    ydl_opts = {
-        'format': 'bestaudio/best', # 只下載音訊，體積小
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '128', # 128k 對語音識別已足夠
-        }],
-        'outtmpl': 'show_audio', # 檔名範本 (yt-dlp 會自動加 .mp3)
-        'playlistend': 1,     # 只抓最新一集
-        'quiet': True,
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 1. 先抓資訊
-            info = ydl.extract_info(TARGET_URL, download=False)
-            if 'entries' not in info or not info['entries']:
-                return None, None, "找不到影片"
-            
-            video_info = info['entries'][0]
-            title = video_info['title']
-            url = f"https://www.youtube.com/watch?v={video_info['id']}"
-            print(f"🎯 鎖定影片: {title}")
-
-            # 2. 開始下載
-            print("🚀 開始下載音訊 (這可能需要幾秒鐘)...")
-            ydl.download([url])
-            
-            # 確認檔案是否存在
-            if os.path.exists(OUTPUT_FILENAME):
-                print(f"✅ 音訊下載完成: {os.path.getsize(OUTPUT_FILENAME) / 1024 / 1024:.2f} MB")
-                return OUTPUT_FILENAME, title, url
-            else:
-                return None, title, "下載失敗，檔案未生成"
-
-    except Exception as e:
-        print(f"❌ 下載流程失敗: {e}")
-        return None, None, None
-
-def generate_audio_report():
-    audio_path, title, url = download_audio()
+    # 1. 計算日期，確保搜到的是「最新」的
+    tw_now = datetime.now(pytz.timezone('Asia/Taipei'))
+    today_str = tw_now.strftime('%Y-%m-%d')
+    yesterday_str = (tw_now - timedelta(days=1)).strftime('%Y-%m-%d')
     
-    if not audio_path:
-        print("無法取得音檔，跳過分析。")
-        return None
-
-    print("📤 上傳音檔至 Gemini...")
+    # 2. 設定搜尋關鍵字 (這就像你在 Google 搜尋欄打字一樣)
+    search_query = f"理財達人秀 {yesterday_str} {today_str} 重點 李兆華 權證小哥 艾倫"
+    
     genai.configure(api_key=GEMINI_API_KEY)
     
+    # 🌟 關鍵魔法：啟用 Google Search 工具
+    # 這會讓 Gemini 擁有「上網搜尋」的能力，就像 NotebookLM 一樣
+    tools = [
+        {'google_search_retrieval': {
+            'dynamic_retrieval_config': {
+                'mode': 'dynamic',
+                'dynamic_threshold': 0.3,
+            }
+        }}
+    ]
+    
+    model = genai.GenerativeModel('gemini-2.5-flash', tools=tools)
+    
+    prompt = f"""
+    請利用 Google 搜尋功能，查找「理財達人秀」最近一集(昨日或今日)的節目內容。
+    搜尋關鍵字建議："{search_query}"
+    
+    【任務目標】
+    請根據搜尋到的最新資訊 (包含影片標題、新聞報導、社群討論)，整理出精華筆記。
+    
+    重點分析人物：
+    1. **權證小哥**：是否有提到特定籌碼、分點或個股？
+    2. **艾倫 (Allen)**：看好什麼產業或題材？
+    3. **李兆華**：本集討論的主題是什麼？
+
+    ⚠️ **嚴格規定**：
+    * **必須真實**：完全基於搜尋結果，如果搜尋結果沒有提到某人的觀點，請寫「本集無相關資訊」。
+    * **不要瞎掰**：如果找不到最新的，請誠實回報「找不到今日最新節目資訊」。
+
+    ---
+    **格式 (繁體中文)**：
+
+    📺 **理財達人秀：昨日精華筆記**
+    (日期：{yesterday_str} ~ {today_str})
+
+    💡 **達人觀點透視**：
+    🔹 **權證小哥**：(搜尋到的重點)
+    🔹 **艾倫分析師**：(搜尋到的重點)
+    🔹 **李兆華 (主題)**：(搜尋到的重點)
+
+    📝 **綜合觀察**：(一句話總結搜尋到的市場氣氛)
+    """
+    
     try:
-        # 1. 上傳檔案
-        audio_file = genai.upload_file(path=audio_path)
-        print(f"✅ 上傳成功，檔案 ID: {audio_file.name}")
-
-        # 2. 等待檔案處理 (Google 需要一點時間處理音訊)
-        print("⏳ 等待 AI 處理音訊中...")
-        while audio_file.state.name == "PROCESSING":
-            time.sleep(5)
-            audio_file = genai.get_file(audio_file.name)
-        
-        if audio_file.state.name == "FAILED":
-            raise ValueError("音訊處理失敗")
-
-        # 3. 呼叫 Gemini 聽音檔
-        print("🎧 Gemini 正在聆聽並做筆記...")
-        model = genai.GenerativeModel('gemini-2.5-flash') # 支援多模態
-        
-        prompt = f"""
-        你是一位專業的財經節目筆記整理者。請「仔細聆聽」這段「理財達人秀」的節目錄音，整理出精華重點。
-        
-        【節目資訊】
-        標題：{title}
-        連結：{url}
-
-        【任務目標】
-        請針對以下人物的發言進行深度分析。若是多人對話，請根據聲線與內容推測（女主持人是李兆華）。
-        
-        1. **權證小哥**：重點在籌碼、分點券商、特殊型態。
-        2. **艾倫 (Allen)**：重點在產業趨勢、題材。
-        3. **李兆華**：市場氛圍總結。
-
-        ⚠️ **嚴格規定**：
-        * **必須有乾貨**：不要寫「小哥分析了股市」，要寫「小哥指出XX股票主力大買...」。
-        * **誠實標註**：如果沒聽到某人的聲音，請寫「本集未出席」。
-
-        ---
-        **格式 (繁體中文)**：
-
-        📺 **理財達人秀：昨日精華筆記**
-        ({title})
-
-        💡 **達人觀點透視**：
-        🔹 **權證小哥**：
-        (聽到的重點摘要)
-        
-        🔹 **艾倫分析師**：
-        (聽到的重點摘要)
-        
-        🔹 **李兆華 (總結)**：
-        (聽到的重點摘要)
-
-        🔗 **觀看連結**：{url}
-        """
-
-        response = model.generate_content([prompt, audio_file])
-        
-        # 4. 清理雲端檔案 (省空間)
-        genai.delete_file(audio_file.name)
-        
+        response = model.generate_content(prompt)
+        # 檢查是否有內容 (避免搜尋失敗回傳空值)
+        if not response.text or "找不到" in response.text:
+            print("搜尋結果不足，跳過發送。")
+            return None
+            
         return response.text
-
     except Exception as e:
-        print(f"❌ Gemini 分析失敗: {e}")
+        print(f"Gemini 搜尋分析失敗: {e}")
         return None
-    finally:
-        # 清理本地檔案
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
 
 # ==========================================
 # 🚀 主程式
@@ -264,14 +199,14 @@ if __name__ == "__main__":
 
     # --- 任務 2 ---
     try:
-        print("--- 任務 2：理財達人秀 (音訊版) ---")
-        report2 = generate_audio_report()
+        print("--- 任務 2：理財達人秀 (搜尋版) ---")
+        report2 = generate_show_report_via_search()
         
         if report2:
             send_line_push(report2)
             print("✅ 達人秀筆記發送成功！")
         else:
-            print("⚠️ 無法產生筆記")
+            print("⚠️ 無法產生筆記 (可能無新資訊)")
             
     except Exception as e:
         print(f"❌ 達人秀失敗: {e}")
