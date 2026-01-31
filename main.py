@@ -9,10 +9,7 @@ from datetime import datetime
 import pytz
 import time
 import json
-
-# --- 新增的套件 ---
 import yt_dlp
-from youtube_transcript_api import YouTubeTranscriptApi
 
 # --- 設定環境變數 ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -20,7 +17,7 @@ LINE_TOKEN = os.environ.get("LINE_TOKEN", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "").strip()
 
 # ==========================================
-# 🔴 第一部分：原有的台美股戰報
+# 🔴 第一部分：台美股戰報 (保持不變)
 # ==========================================
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 MARKET_RSS_URLS = [
@@ -46,7 +43,6 @@ def get_market_data():
     signals = []
     tw_summary = ""
     print("正在分析市場數據 (第一戰報)...")
-    
     for ticker in US_WATCHLIST:
         try:
             df = yf.download(ticker, period="3mo", interval="1d", progress=False)
@@ -65,7 +61,6 @@ def get_market_data():
             if ticker_signals:
                 signals.append(f"{ticker}: {' '.join(ticker_signals)}")
         except: continue
-
     try:
         twii = yf.download("^TWII", period="5d", progress=False)
         if isinstance(twii.columns, pd.MultiIndex):
@@ -76,7 +71,6 @@ def get_market_data():
             tw_summary = f"台股昨收漲跌 {change:+.0f} 點 ({pct_change:+.2f}%)"
         else: tw_summary = "資料不足"
     except: tw_summary = "無法取得數據"
-
     tech_report = "\n".join(signals) if signals else "無特殊異常。"
     return tech_report, tw_summary
 
@@ -115,121 +109,139 @@ def generate_stock_report():
     return model.generate_content(prompt).text
 
 # ==========================================
-# 🔵 第二部分：理財達人秀 (yt-dlp 強化搜尋版)
+# 🔵 第二部分：理財達人秀 (音訊分析版 🎧)
 # ==========================================
 
-def get_youtube_transcript():
-    """使用 yt-dlp 搜尋理財達人秀最新影片並抓取字幕"""
-    print("正在搜尋 YouTube 最新影片...")
+def download_audio():
+    """下載最新一集影片的音軌 (MP3)"""
+    print("🎧 正在搜尋並下載理財達人秀音檔...")
     
-    # 設定 yt-dlp 搜尋參數
+    # 目標：理財達人秀官方頻道的最新影片
+    TARGET_URL = "https://www.youtube.com/@moneymaker48/videos"
+    OUTPUT_FILENAME = "show_audio.mp3"
+
+    # 清理舊檔案
+    if os.path.exists(OUTPUT_FILENAME):
+        os.remove(OUTPUT_FILENAME)
+
     ydl_opts = {
-        'default_search': 'ytsearch1', # 只搜尋 1 筆結果
-        'quiet': True,                 # 安靜模式，不印出一大堆下載進度
-        'extract_flat': True,          # 快速抓取標題就好，不要真的下載影片
-        'noplaylist': True,
+        'format': 'bestaudio/best', # 只下載音訊，體積小
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '128', # 128k 對語音識別已足夠
+        }],
+        'outtmpl': 'show_audio', # 檔名範本 (yt-dlp 會自動加 .mp3)
+        'playlistend': 1,     # 只抓最新一集
+        'quiet': True,
     }
 
     try:
-        # 1. 搜尋影片
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 搜尋關鍵字：理財達人秀 (它會自動找最相關/最新的)
-            info = ydl.extract_info("理財達人秀", download=False)
-            
+            # 1. 先抓資訊
+            info = ydl.extract_info(TARGET_URL, download=False)
             if 'entries' not in info or not info['entries']:
                 return None, None, "找不到影片"
             
             video_info = info['entries'][0]
-            video_id = video_info['id']
-            video_title = video_info['title']
-            video_url = video_info['url']
+            title = video_info['title']
+            url = f"https://www.youtube.com/watch?v={video_info['id']}"
+            print(f"🎯 鎖定影片: {title}")
+
+            # 2. 開始下載
+            print("🚀 開始下載音訊 (這可能需要幾秒鐘)...")
+            ydl.download([url])
             
-            print(f"找到影片: {video_title} (ID: {video_id})")
-
-        # 2. 抓取字幕 (使用 youtube_transcript_api)
-        # 嘗試順序：繁體中文 -> 簡體中文 -> 自動產生
-        try:
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['zh-TW', 'zh-Hant', 'zh', 'zh-Hans'])
-        except:
-            print("無標準中文字幕，嘗試抓取自動產生的字幕...")
-            try:
-                # 如果沒有手動字幕，列出所有可用字幕並選第一個
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            except Exception as e:
-                print(f"無法取得任何字幕: {e}")
-                return None, video_title, "本集無字幕可供分析"
-
-        # 3. 組合字幕文字
-        full_text = " ".join([t['text'] for t in transcript_list])
-        
-        # 限制長度，只取前 25000 字 (通常夠了，且不會爆 Token)
-        return full_text[:25000], video_title, video_url
+            # 確認檔案是否存在
+            if os.path.exists(OUTPUT_FILENAME):
+                print(f"✅ 音訊下載完成: {os.path.getsize(OUTPUT_FILENAME) / 1024 / 1024:.2f} MB")
+                return OUTPUT_FILENAME, title, url
+            else:
+                return None, title, "下載失敗，檔案未生成"
 
     except Exception as e:
-        print(f"YouTube 處理失敗: {e}")
+        print(f"❌ 下載流程失敗: {e}")
         return None, None, None
 
-def generate_show_report():
-    # 取得字幕
-    transcript, title, url = get_youtube_transcript()
+def generate_audio_report():
+    audio_path, title, url = download_audio()
     
-    if not transcript:
-        print("今日無有效字幕資料，跳過。")
+    if not audio_path:
+        print("無法取得音檔，跳過分析。")
         return None
 
-    print("呼叫 Gemini 閱讀字幕中...")
+    print("📤 上傳音檔至 Gemini...")
     genai.configure(api_key=GEMINI_API_KEY)
-    # 使用 2.5-flash，吞吐量大，適合讀長文
-    model = genai.GenerativeModel('gemini-2.5-flash')
-    
-    prompt = f"""
-    你是一位專業的財經節目筆記整理者。請閱讀以下「理財達人秀」的完整節目逐字稿，整理出精華重點。
-
-    【節目資訊】
-    標題：{title}
-    連結：{url}
-
-    【逐字稿內容 (部分)】
-    {transcript}
-
-    ---
-    【任務目標】
-    請根據逐字稿內容，深度分析以下來賓的觀點。如果逐字稿中沒有明確標示人名，請根據對話內容推測（通常李兆華是主持人，負責提問）。
-    
-    1. **權證小哥**：專注於「籌碼動向」、「主力進出」、「分點券商」或「特殊技術型態」。
-    2. **艾倫 (Allen)**：專注於「產業趨勢」、「基本面」或「個股題材」。
-    3. **李兆華**：整理她強調的今日市場氛圍或總結。
-
-    ⚠️ **嚴格規定**：
-    * **必須有乾貨**：不要寫「小哥分析了股市」，要寫「小哥指出XX股票主力大買...」、「艾倫看好散熱族群...」。
-    * **如果某人沒來**：如果整篇稿子都沒出現某位達人，請誠實標註「本集未出席」。
-    * **不要瞎掰**：只根據逐字稿內容撰寫。
-
-    ---
-    **格式如下 (繁體中文)**：
-
-    📺 **理財達人秀：昨日精華筆記**
-    ({title})
-
-    💡 **達人觀點透視**：
-    🔹 **權證小哥**：
-    (請列出具體分析，例如看好的個股、觀察到的籌碼異常)
-    
-    🔹 **艾倫分析師**：
-    (請列出看好的產業或個股理由)
-    
-    🔹 **李兆華 (總結)**：
-    (本集核心結論)
-
-    🔗 **觀看連結**：{url}
-    """
     
     try:
-        response = model.generate_content(prompt)
+        # 1. 上傳檔案
+        audio_file = genai.upload_file(path=audio_path)
+        print(f"✅ 上傳成功，檔案 ID: {audio_file.name}")
+
+        # 2. 等待檔案處理 (Google 需要一點時間處理音訊)
+        print("⏳ 等待 AI 處理音訊中...")
+        while audio_file.state.name == "PROCESSING":
+            time.sleep(5)
+            audio_file = genai.get_file(audio_file.name)
+        
+        if audio_file.state.name == "FAILED":
+            raise ValueError("音訊處理失敗")
+
+        # 3. 呼叫 Gemini 聽音檔
+        print("🎧 Gemini 正在聆聽並做筆記...")
+        model = genai.GenerativeModel('gemini-2.5-flash') # 支援多模態
+        
+        prompt = f"""
+        你是一位專業的財經節目筆記整理者。請「仔細聆聽」這段「理財達人秀」的節目錄音，整理出精華重點。
+        
+        【節目資訊】
+        標題：{title}
+        連結：{url}
+
+        【任務目標】
+        請針對以下人物的發言進行深度分析。若是多人對話，請根據聲線與內容推測（女主持人是李兆華）。
+        
+        1. **權證小哥**：重點在籌碼、分點券商、特殊型態。
+        2. **艾倫 (Allen)**：重點在產業趨勢、題材。
+        3. **李兆華**：市場氛圍總結。
+
+        ⚠️ **嚴格規定**：
+        * **必須有乾貨**：不要寫「小哥分析了股市」，要寫「小哥指出XX股票主力大買...」。
+        * **誠實標註**：如果沒聽到某人的聲音，請寫「本集未出席」。
+
+        ---
+        **格式 (繁體中文)**：
+
+        📺 **理財達人秀：昨日精華筆記**
+        ({title})
+
+        💡 **達人觀點透視**：
+        🔹 **權證小哥**：
+        (聽到的重點摘要)
+        
+        🔹 **艾倫分析師**：
+        (聽到的重點摘要)
+        
+        🔹 **李兆華 (總結)**：
+        (聽到的重點摘要)
+
+        🔗 **觀看連結**：{url}
+        """
+
+        response = model.generate_content([prompt, audio_file])
+        
+        # 4. 清理雲端檔案 (省空間)
+        genai.delete_file(audio_file.name)
+        
         return response.text
+
     except Exception as e:
-        print(f"分析失敗: {e}")
+        print(f"❌ Gemini 分析失敗: {e}")
         return None
+    finally:
+        # 清理本地檔案
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
 
 # ==========================================
 # 🚀 主程式
@@ -239,7 +251,7 @@ def send_line_push(content):
     line_bot_api.push_message(GROUP_ID, TextSendMessage(text=content))
 
 if __name__ == "__main__":
-    # --- 任務 1：台美股戰報 ---
+    # --- 任務 1 ---
     try:
         print("--- 任務 1：台美股戰報 ---")
         report1 = generate_stock_report()
@@ -248,18 +260,18 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 戰報失敗: {e}")
 
-    time.sleep(5) # 休息一下，避免連續發送
+    time.sleep(5)
 
-    # --- 任務 2：達人秀字幕分析 ---
+    # --- 任務 2 ---
     try:
-        print("--- 任務 2：理財達人秀 (字幕版) ---")
-        report2 = generate_show_report()
+        print("--- 任務 2：理財達人秀 (音訊版) ---")
+        report2 = generate_audio_report()
         
         if report2:
             send_line_push(report2)
             print("✅ 達人秀筆記發送成功！")
         else:
-            print("⚠️ 無法產生達人秀筆記 (可能無字幕或無影片)")
+            print("⚠️ 無法產生筆記")
             
     except Exception as e:
         print(f"❌ 達人秀失敗: {e}")
