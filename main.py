@@ -8,9 +8,10 @@ import pandas as pd
 from datetime import datetime
 import pytz
 import time
+import json
 
-# --- 新增的 YouTube 相關套件 ---
-from youtubesearchpython import VideosSearch
+# --- 新增的套件 ---
+import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
 
 # --- 設定環境變數 ---
@@ -19,7 +20,7 @@ LINE_TOKEN = os.environ.get("LINE_TOKEN", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "").strip()
 
 # ==========================================
-# 🔴 第一部分：原有的台美股戰報 (保持不變)
+# 🔴 第一部分：原有的台美股戰報
 # ==========================================
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 MARKET_RSS_URLS = [
@@ -114,46 +115,54 @@ def generate_stock_report():
     return model.generate_content(prompt).text
 
 # ==========================================
-# 🔵 第二部分：理財達人秀 (YouTube 字幕分析版)
+# 🔵 第二部分：理財達人秀 (yt-dlp 強化搜尋版)
 # ==========================================
 
 def get_youtube_transcript():
-    """搜尋理財達人秀最新影片並抓取字幕"""
+    """使用 yt-dlp 搜尋理財達人秀最新影片並抓取字幕"""
     print("正在搜尋 YouTube 最新影片...")
-    transcript_text = ""
-    video_title = ""
-    video_url = ""
     
+    # 設定 yt-dlp 搜尋參數
+    ydl_opts = {
+        'default_search': 'ytsearch1', # 只搜尋 1 筆結果
+        'quiet': True,                 # 安靜模式，不印出一大堆下載進度
+        'extract_flat': True,          # 快速抓取標題就好，不要真的下載影片
+        'noplaylist': True,
+    }
+
     try:
-        # 1. 搜尋最新的一集
-        videosSearch = VideosSearch('理財達人秀', limit = 1)
-        result = videosSearch.result()
-        
-        if not result['result']:
-            return None, None, "找不到影片"
+        # 1. 搜尋影片
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # 搜尋關鍵字：理財達人秀 (它會自動找最相關/最新的)
+            info = ydl.extract_info("理財達人秀", download=False)
             
-        video_info = result['result'][0]
-        video_id = video_info['id']
-        video_title = video_info['title']
-        video_url = video_info['link']
-        
-        print(f"找到影片: {video_title}")
-        
-        # 2. 抓取字幕 (嘗試繁體中文，如果沒有則抓自動產生的)
+            if 'entries' not in info or not info['entries']:
+                return None, None, "找不到影片"
+            
+            video_info = info['entries'][0]
+            video_id = video_info['id']
+            video_title = video_info['title']
+            video_url = video_info['url']
+            
+            print(f"找到影片: {video_title} (ID: {video_id})")
+
+        # 2. 抓取字幕 (使用 youtube_transcript_api)
+        # 嘗試順序：繁體中文 -> 簡體中文 -> 自動產生
         try:
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['zh-TW', 'zh-Hant', 'zh'])
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['zh-TW', 'zh-Hant', 'zh', 'zh-Hans'])
         except:
-            # 如果沒有標準中文，嘗試抓取所有可用字幕
+            print("無標準中文字幕，嘗試抓取自動產生的字幕...")
             try:
+                # 如果沒有手動字幕，列出所有可用字幕並選第一個
                 transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
             except Exception as e:
-                print(f"無法取得字幕: {e}")
+                print(f"無法取得任何字幕: {e}")
                 return None, video_title, "本集無字幕可供分析"
 
         # 3. 組合字幕文字
         full_text = " ".join([t['text'] for t in transcript_list])
         
-        # 限制長度以免超過 Token 上限 (取前 25000 字通常夠了)
+        # 限制長度，只取前 25000 字 (通常夠了，且不會爆 Token)
         return full_text[:25000], video_title, video_url
 
     except Exception as e:
@@ -170,7 +179,7 @@ def generate_show_report():
 
     print("呼叫 Gemini 閱讀字幕中...")
     genai.configure(api_key=GEMINI_API_KEY)
-    # 使用 2.5-flash，它的 Context Window 很大，可以吃下整集字幕
+    # 使用 2.5-flash，吞吐量大，適合讀長文
     model = genai.GenerativeModel('gemini-2.5-flash')
     
     prompt = f"""
@@ -192,7 +201,7 @@ def generate_show_report():
     3. **李兆華**：整理她強調的今日市場氛圍或總結。
 
     ⚠️ **嚴格規定**：
-    * **必須有乾貨**：不要寫「小哥分析了股市」，要寫「小哥指出XX股票主力大買...」。
+    * **必須有乾貨**：不要寫「小哥分析了股市」，要寫「小哥指出XX股票主力大買...」、「艾倫看好散熱族群...」。
     * **如果某人沒來**：如果整篇稿子都沒出現某位達人，請誠實標註「本集未出席」。
     * **不要瞎掰**：只根據逐字稿內容撰寫。
 
@@ -239,7 +248,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 戰報失敗: {e}")
 
-    time.sleep(5) # 休息一下
+    time.sleep(5) # 休息一下，避免連續發送
 
     # --- 任務 2：達人秀字幕分析 ---
     try:
