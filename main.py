@@ -16,7 +16,7 @@ LINE_TOKEN = os.environ.get("LINE_TOKEN", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "").strip()
 
 # ==========================================
-# 🔴 第一部分：台美股戰報 (維持不變)
+# 🔴 第一部分：台美股戰報
 # ==========================================
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 MARKET_RSS_URLS = [
@@ -82,16 +82,27 @@ def generate_stock_report():
     tw_time = datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y/%m/%d')
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
+    
+    # 👇 修改處：移除星號，改用簡單符號
     prompt = f"""
     你是嚴謹的台股分析師。請撰寫戰報。
     資料A: {tw_info}
     資料B: {us_signals}
     資料C: {raw_news}
-    格式:
-    📊 **台美股戰報** ({tw_time})
-    **1. 盤勢重點**: (一句話)
-    **2. 焦點族群**: (點名板塊)
-    **3. 操盤錦囊**: (一句話建議)
+    
+    請使用「純文字」格式，不要使用 Markdown 的星號 (**)。
+    
+    格式範例:
+    📊 台美股戰報 ({tw_time})
+    
+    【盤勢重點】
+    (一句話)
+    
+    【焦點族群】
+    (點名板塊)
+    
+    【操盤錦囊】
+    (一句話建議)
     """
     return model.generate_content(prompt).text
 
@@ -99,7 +110,6 @@ def generate_stock_report():
 # 🔵 第二部分：雙 Podcast 聽力分析版 🎧
 # ==========================================
 
-# 🎙️ 節目清單 (這裡設定了你要的兩個節目)
 PODCASTS = [
     {
         "name": "兆華與股惑仔",
@@ -118,11 +128,10 @@ def get_latest_episode(rss_url):
         feed = feedparser.parse(rss_url)
         if not feed.entries: return None, None, None
         
-        entry = feed.entries[0] # 最新的一集
+        entry = feed.entries[0]
         title = entry.title
         link = entry.link
         
-        # 找 MP3 連結
         mp3_url = None
         for enclosure in feed.entries[0].get('enclosures', []):
             if 'audio' in enclosure.get('type', ''):
@@ -155,9 +164,6 @@ def analyze_podcast(podcast_config):
     if not mp3_url:
         print(f"❌ {name} 無法取得音檔，跳過。")
         return None
-
-    # 檢查標題，避免重複分析舊聞 (這裡簡單實作，每次都分析最新一集)
-    # 你可以加上日期判斷，例如只分析 24 小時內的
     
     local_file = f"{name}_temp.mp3"
     if not download_mp3(mp3_url, local_file): return None
@@ -166,15 +172,14 @@ def analyze_podcast(podcast_config):
     genai.configure(api_key=GEMINI_API_KEY)
     
     try:
-        # 1. 上傳
         audio_file = genai.upload_file(path=local_file)
         while audio_file.state.name == "PROCESSING":
             time.sleep(2)
             audio_file = genai.get_file(audio_file.name)
         
-        # 2. 分析
         model = genai.GenerativeModel('gemini-2.5-flash')
         
+        # 👇 修改處：移除星號，移除連結，改用 Emoji 和方括號
         prompt = f"""
         你是一位專業的投資筆記整理者。請聽這集「{name}」Podcast。
         標題：{title}
@@ -183,26 +188,25 @@ def analyze_podcast(podcast_config):
         {role_prompt}
         請過濾閒聊，只保留含金量高的投資觀點。
         
-        1. **市場觀點**：(多空看法、資金流向)
-        2. **焦點話題**：(提到的具體產業或公司)
-        3. **達人建議**：(操作心法或避雷提醒)
-
-        ---
-        **格式 (繁體中文)**：
+        請使用「純文字」格式，不要使用 Markdown 的星號 (**)，也不要附上連結。
         
-        🎙️ **{name} 精華筆記**
+        格式範例 (繁體中文)：
+        
+        🎙️ {name} 精華筆記
         ({title})
         
-        📈 **市場觀點**：...
-        🔥 **焦點話題**：...
-        💡 **達人建議**：...
+        📈 市場觀點：
+        (重點摘要)
         
-        🔗 收聽：{link}
+        🔥 焦點話題：
+        (重點摘要)
+        
+        💡 達人建議：
+        (重點摘要)
         """
         
         response = model.generate_content([prompt, audio_file])
         
-        # 清理
         genai.delete_file(audio_file.name)
         os.remove(local_file)
         
@@ -221,7 +225,7 @@ def send_line_push(content):
     line_bot_api.push_message(GROUP_ID, TextSendMessage(text=content))
 
 if __name__ == "__main__":
-    # --- 任務 1：台美股戰報 ---
+    # --- 任務 1 ---
     try:
         print("--- 任務 1：台美股戰報 ---")
         report1 = generate_stock_report()
@@ -230,20 +234,16 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 戰報失敗: {e}")
 
-    # --- 任務 2：Podcast 輪播 ---
+    # --- 任務 2 ---
     print("\n--- 任務 2：Podcast 筆記 ---")
-    
     for podcast in PODCASTS:
         try:
-            # 每個節目之間休息 5 秒，避免 LINE 或 Gemini 過熱
             time.sleep(5)
-            
             report = analyze_podcast(podcast)
             if report:
                 send_line_push(report)
                 print(f"✅ {podcast['name']} 發送成功！")
             else:
                 print(f"⚠️ {podcast['name']} 無報告")
-                
         except Exception as e:
             print(f"❌ {podcast['name']} 執行錯誤: {e}")
