@@ -16,6 +16,24 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # 👇【新增這一段】安裝 FFmpeg 影音工具
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install libraries
+        run: |
+          pip install -r requirements.txt
 
       - name: Install libraries
         run: |
