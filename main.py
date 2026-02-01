@@ -5,7 +5,7 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import time
 import requests
@@ -15,8 +15,25 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 LINE_TOKEN = os.environ.get("LINE_TOKEN", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "").strip()
 
+# 設定時區 (關鍵：確保日期顯示正確)
+TW_TZ = pytz.timezone('Asia/Taipei')
+
 # ==========================================
-# 🔴 第一部分：台美股戰報
+# 📅 工具函式：判斷是否為週末
+# ==========================================
+def is_weekend():
+    # weekday(): 0=週一 ... 4=週五, 5=週六, 6=週日
+    weekday = datetime.now(TW_TZ).weekday()
+    return weekday >= 5
+
+def get_current_date_str():
+    # 格式範例：2024/02/01 (週六)
+    now = datetime.now(TW_TZ)
+    weekdays = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+    return f"{now.strftime('%Y/%m/%d')} ({weekdays[now.weekday()]})"
+
+# ==========================================
+# 📊 任務 1-A：平日台美股戰報
 # ==========================================
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 MARKET_RSS_URLS = [
@@ -38,7 +55,7 @@ def calculate_rsi(data, window=14):
 def get_market_data():
     signals = []
     tw_summary = ""
-    print("正在分析市場數據 (第一戰報)...")
+    print("正在分析市場數據 (平日模式)...")
     for ticker in US_WATCHLIST:
         try:
             df = yf.download(ticker, period="3mo", interval="1d", progress=False)
@@ -79,21 +96,21 @@ def get_market_news():
 def generate_stock_report():
     raw_news = get_market_news()
     us_signals, tw_info = get_market_data()
-    tw_time = datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y/%m/%d')
+    date_str = get_current_date_str()
+    
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
     
-    # 👇 修改處：移除星號，改用簡單符號
     prompt = f"""
-    你是嚴謹的台股分析師。請撰寫戰報。
+    你是嚴謹的台股分析師。請撰寫平日戰報。
     資料A: {tw_info}
     資料B: {us_signals}
     資料C: {raw_news}
     
-    請使用「純文字」格式，不要使用 Markdown 的星號 (**)。
+    請使用「純文字」格式，不要星號。
     
     格式範例:
-    📊 台美股戰報 ({tw_time})
+    📊 台美股戰報 {date_str}
     
     【盤勢重點】
     (一句話)
@@ -107,7 +124,52 @@ def generate_stock_report():
     return model.generate_content(prompt).text
 
 # ==========================================
-# 🔵 第二部分：雙 Podcast 聽力分析版 🎧
+# 🌎 任務 1-B：週末國際財經戰報 (新功能)
+# ==========================================
+def generate_weekend_report():
+    print("正在分析國際情勢 (週末模式)...")
+    date_str = get_current_date_str()
+    
+    # 週末只抓比特幣 (因為它不休息) 和 國際頭條
+    try:
+        btc = yf.download("BTC-USD", period="2d", interval="1d", progress=False)
+        if isinstance(btc.columns, pd.MultiIndex):
+            btc.columns = btc.columns.get_level_values(0)
+        btc_price = btc['Close'].iloc[-1]
+        btc_change = (btc_price - btc['Close'].iloc[-2]) / btc['Close'].iloc[-2] * 100
+        btc_info = f"比特幣(BTC) 現價 {btc_price:.0f} 美元 (24h漲跌 {btc_change:+.2f}%)"
+    except:
+        btc_info = "比特幣數據讀取失敗"
+
+    raw_news = get_market_news()
+
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    
+    prompt = f"""
+    今天是週末，股市沒開盤。請撰寫一份「國際財經與趨勢回顧」。
+    
+    資料A (加密貨幣): {btc_info}
+    資料B (國際頭條): {raw_news}
+    
+    請使用「純文字」格式，不要星號。
+    
+    格式範例:
+    🌎 週末國際財經觀察 {date_str}
+    
+    【比特幣/加密貨幣】
+    (根據資料A簡評)
+    
+    【本週國際大事】
+    (根據資料B或你已知的近期大事總結)
+    
+    【下週展望】
+    (給投資人的心態建議)
+    """
+    return model.generate_content(prompt).text
+
+# ==========================================
+# 🎧 任務 2：Podcast (新增：舊節目過濾功能)
 # ==========================================
 
 PODCASTS = [
@@ -123,12 +185,35 @@ PODCASTS = [
     }
 ]
 
+def is_fresh_episode(published_struct_time):
+    """檢查節目是否為 24 小時內發布的新鮮貨"""
+    if not published_struct_time: return False
+    
+    # 將 struct_time 轉為 datetime (UTC)
+    pub_time = datetime.fromtimestamp(time.mktime(published_struct_time)).replace(tzinfo=pytz.utc)
+    now_time = datetime.now(pytz.utc)
+    
+    # 計算時間差
+    diff = now_time - pub_time
+    
+    # 這裡設定 25 小時，寬容一點點誤差
+    if diff < timedelta(hours=25):
+        return True
+    else:
+        print(f"🕒 節目已發布超過 {diff.total_seconds()/3600:.1f} 小時，視為舊聞，不推送。")
+        return False
+
 def get_latest_episode(rss_url):
     try:
         feed = feedparser.parse(rss_url)
         if not feed.entries: return None, None, None
         
         entry = feed.entries[0]
+        
+        # 🔥 關鍵修改：檢查發布時間
+        if not is_fresh_episode(entry.published_parsed):
+            return None, None, None # 如果是舊的，直接回傳 None
+            
         title = entry.title
         link = entry.link
         
@@ -139,10 +224,12 @@ def get_latest_episode(rss_url):
                 break
         
         return mp3_url, title, link
-    except: return None, None, None
+    except Exception as e:
+        print(f"RSS 解析錯誤: {e}")
+        return None, None, None
 
 def download_mp3(url, filename="temp_podcast.mp3"):
-    print(f"🚀 下載音訊中... (來源: {url[:30]}...)")
+    print(f"🚀 下載音訊中...")
     try:
         r = requests.get(url, stream=True)
         with open(filename, 'wb') as f:
@@ -159,16 +246,18 @@ def analyze_podcast(podcast_config):
     role_prompt = podcast_config['prompt_role']
     
     print(f"🎧 正在檢查節目：{name} ...")
+    
+    # 這裡會進行「時效檢查」，如果是舊節目就會拿到 None
     mp3_url, title, link = get_latest_episode(rss)
     
     if not mp3_url:
-        print(f"❌ {name} 無法取得音檔，跳過。")
+        print(f"⚠️ {name} 無最新集數 (可能是假日未更新)，跳過。")
         return None
     
     local_file = f"{name}_temp.mp3"
     if not download_mp3(mp3_url, local_file): return None
 
-    print(f"🧠 Gemini 正在聆聽 {name} ...")
+    print(f"🧠 Gemini 正在聆聽 {name} ({title}) ...")
     genai.configure(api_key=GEMINI_API_KEY)
     
     try:
@@ -179,7 +268,6 @@ def analyze_podcast(podcast_config):
         
         model = genai.GenerativeModel('gemini-2.5-flash')
         
-        # 👇 修改處：移除星號，移除連結，改用 Emoji 和方括號
         prompt = f"""
         你是一位專業的投資筆記整理者。請聽這集「{name}」Podcast。
         標題：{title}
@@ -188,7 +276,7 @@ def analyze_podcast(podcast_config):
         {role_prompt}
         請過濾閒聊，只保留含金量高的投資觀點。
         
-        請使用「純文字」格式，不要使用 Markdown 的星號 (**)，也不要附上連結。
+        請使用「純文字」格式，不要使用 Markdown 星號 (**)，也不要連結。
         
         格式範例 (繁體中文)：
         
@@ -218,24 +306,36 @@ def analyze_podcast(podcast_config):
         return None
 
 # ==========================================
-# 🚀 主程式
+# 🚀 主程式 (邏輯控制中心)
 # ==========================================
 def send_line_push(content):
     line_bot_api = LineBotApi(LINE_TOKEN)
     line_bot_api.push_message(GROUP_ID, TextSendMessage(text=content))
 
 if __name__ == "__main__":
-    # --- 任務 1 ---
-    try:
-        print("--- 任務 1：台美股戰報 ---")
-        report1 = generate_stock_report()
-        send_line_push(report1)
-        print("✅ 戰報發送成功！")
-    except Exception as e:
-        print(f"❌ 戰報失敗: {e}")
+    
+    # 1. 判斷今天是平日還是週末
+    if is_weekend():
+        # --- 週末模式 ---
+        try:
+            print("--- 執行任務：週末國際財經戰報 ---")
+            report = generate_weekend_report()
+            send_line_push(report)
+            print("✅ 週末戰報發送成功！")
+        except Exception as e:
+            print(f"❌ 週末戰報失敗: {e}")
+    else:
+        # --- 平日模式 ---
+        try:
+            print("--- 執行任務：平日台美股戰報 ---")
+            report = generate_stock_report()
+            send_line_push(report)
+            print("✅ 平日戰報發送成功！")
+        except Exception as e:
+            print(f"❌ 平日戰報失敗: {e}")
 
-    # --- 任務 2 ---
-    print("\n--- 任務 2：Podcast 筆記 ---")
+    # 2. Podcast 檢查 (平日週末都會跑，但有 24H 時效濾網)
+    print("\n--- 執行任務：Podcast 檢查 ---")
     for podcast in PODCASTS:
         try:
             time.sleep(5)
@@ -244,6 +344,7 @@ if __name__ == "__main__":
                 send_line_push(report)
                 print(f"✅ {podcast['name']} 發送成功！")
             else:
-                print(f"⚠️ {podcast['name']} 無報告")
+                # 這裡安靜跳過，不發送任何錯誤訊息給使用者
+                pass 
         except Exception as e:
             print(f"❌ {podcast['name']} 執行錯誤: {e}")
