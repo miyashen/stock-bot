@@ -28,77 +28,60 @@ GROUP_ID = GROUP_ID.strip()
 TW_TZ = pytz.timezone('Asia/Taipei')
 
 # ==========================================
-# 🧠 AI 核心：模型挑選邏輯 (針對 2.0 Flash 優化)
+# 🧠 AI 核心：不死鳥自動換頻機制
 # ==========================================
-CURRENT_MODEL_NAME = None
-
-def get_best_model_name():
-    global CURRENT_MODEL_NAME
-    if CURRENT_MODEL_NAME: return CURRENT_MODEL_NAME
-
-    genai.configure(api_key=GEMINI_API_KEY)
-    print("🔍 正在偵測可用模型清單...")
-    
-    try:
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-        
-        print(f"✅ Google 回報可用模型: {available_models}")
-
-        # 🎯 挑選策略 (優先選 Flash 系列，避開 Pro)
-        
-        # 1. 首選：Gemini 2.0 Flash (穩定且免費額度高)
-        for m in available_models:
-            if 'gemini-2.0-flash' in m and '001' in m: # 找具體版本
-                CURRENT_MODEL_NAME = m
-                return m
-        for m in available_models:
-            if 'gemini-2.0-flash' in m: # 找通用版本
-                CURRENT_MODEL_NAME = m
-                return m
-
-        # 2. 次選：Gemini Flash Latest (通常指向當前穩定的 Flash)
-        for m in available_models:
-            if 'gemini-flash-latest' in m:
-                CURRENT_MODEL_NAME = m
-                return m
-
-        # 3. 三選：任何名字裡有 flash 的 (除了 2.5，因為 2.5 目前額度少)
-        for m in available_models:
-            if 'flash' in m and '2.5' not in m:
-                CURRENT_MODEL_NAME = m
-                return m
-
-        # 4. 最後不得已才選 Pro (但 Pro 容易 429)
-        if available_models:
-            CURRENT_MODEL_NAME = available_models[0]
-            return available_models[0]
-            
-    except Exception as e:
-        print(f"❌ 無法列出模型: {e}")
-        return 'gemini-2.0-flash' # 盲猜一個
-    
-    return 'gemini-2.0-flash'
-
 def get_gemini_response(prompt, audio_file=None):
-    model_name = get_best_model_name()
-    print(f"🤖 決定使用模型: {model_name}")
+    genai.configure(api_key=GEMINI_API_KEY)
+    
+    # 📋 備用模型清單 (按優先順序排列)
+    # 策略：
+    # 1. 2.0-flash-lite: 通常 Lite 版限制最少，最容易通過
+    # 2. flash-latest: 指向當前最穩定的版本
+    # 3. 2.0-flash-001: 特定版本號
+    # 4. 1.5-flash: 嘗試舊版 (雖然可能不在列表但 API 可能支援)
+    # 5. gemini-pro: 最後保底
+    candidate_models = [
+        'gemini-2.0-flash-lite-001',
+        'gemini-2.0-flash-lite',
+        'gemini-flash-latest',
+        'gemini-2.0-flash',        
+        'gemini-1.5-flash',
+        'gemini-1.5-flash-latest',
+        'gemini-pro'
+    ]
 
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(model_name)
-        
-        if audio_file:
-            response = model.generate_content([prompt, audio_file])
-        else:
-            response = model.generate_content(prompt)
+    last_error = None
+
+    for model_name in candidate_models:
+        try:
+            # print(f"🧪 嘗試連線模型: {model_name} ...") # 除錯用
+            model = genai.GenerativeModel(model_name)
             
-        return response.text
-    except Exception as e:
-        print(f"❌ 生成失敗 ({model_name}): {e}")
-        return None
+            if audio_file:
+                # Pro (1.0) 不支援音檔，跳過
+                if 'pro' in model_name and '1.5' not in model_name and '2.' not in model_name:
+                    continue
+                response = model.generate_content([prompt, audio_file])
+            else:
+                response = model.generate_content(prompt)
+            
+            print(f"✅ 成功使用模型: {model_name}")
+            return response.text
+
+        except Exception as e:
+            error_msg = str(e)
+            # print(f"⚠️ {model_name} 失敗: {error_msg.split('Please')[0]}...") # 只印出重點錯誤
+            
+            # 如果是 Quota (429) 或 Not Found (404)，就繼續試下一個
+            if "429" in error_msg or "404" in error_msg or "Quota" in error_msg:
+                continue
+            else:
+                # 其他嚴重錯誤 (如 API Key 錯誤) 則不需重試
+                last_error = e
+                break
+
+    print(f"❌ 所有模型嘗試皆失敗。最後錯誤: {last_error}")
+    return None
 
 # ==========================================
 # 📅 工具函式
@@ -358,9 +341,6 @@ def send_line_push(content):
     line_bot_api.push_message(GROUP_ID, TextSendMessage(text=content))
 
 if __name__ == "__main__":
-    
-    # 執行前的檢查：確保至少抓到一個模型
-    get_best_model_name()
     
     if is_weekend():
         try:
