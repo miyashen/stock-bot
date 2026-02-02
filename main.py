@@ -11,9 +11,9 @@ import time
 import requests
 
 # --- 設定環境變數 ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-LINE_TOKEN = os.environ.get("LINE_TOKEN", "").strip()
-GROUP_ID = os.environ.get("GROUP_ID", "").strip()
+GEMINI_API_KEY = "你的_Gemini_API_Key"
+LINE_TOKEN = "你的_Line_Token"
+GROUP_ID = "你的_Group_ID"
 
 # 設定時區
 TW_TZ = pytz.timezone('Asia/Taipei')
@@ -32,7 +32,7 @@ def get_current_date_str():
     return f"{now.strftime('%Y/%m/%d')} ({weekdays[now.weekday()]})"
 
 # ==========================================
-# 📊 任務 1-A：平日台美股戰報 (維持不變)
+# 📊 任務 1-A：平日台美股戰報 (嚴格數據版)
 # ==========================================
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 MARKET_RSS_URLS = [
@@ -53,74 +53,108 @@ def calculate_rsi(data, window=14):
 
 def get_market_data():
     signals = []
-    tw_summary = ""
+    tw_summary = "無數據"
+    has_data = False # 標記是否成功抓到資料
+
     print("正在分析市場數據 (平日模式)...")
+    
+    # 1. 美股掃描
     for ticker in US_WATCHLIST:
         try:
-            df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+            df = yf.download(ticker, period="5d", interval="1d", progress=False)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            if len(df) < 20: continue 
+            if len(df) < 2: continue 
+            
             df['RSI'] = calculate_rsi(df['Close'])
             rsi = float(df['RSI'].iloc[-1]) if not pd.isna(df['RSI'].iloc[-1]) else 50
+            
             ticker_signals = []
             if rsi > 75: ticker_signals.append(f"⚠️過熱({rsi:.0f})")
             elif rsi < 25: ticker_signals.append(f"💎超跌({rsi:.0f})")
+            
             if ticker_signals:
                 signals.append(f"{ticker}: {' '.join(ticker_signals)}")
+                has_data = True
         except: continue
+
+    # 2. 台股大盤
     try:
         twii = yf.download("^TWII", period="5d", progress=False)
         if isinstance(twii.columns, pd.MultiIndex):
             twii.columns = twii.columns.get_level_values(0)
+        
         if len(twii) >= 2:
             change = twii['Close'].iloc[-1] - twii['Close'].iloc[-2]
             pct_change = (change / twii['Close'].iloc[-2]) * 100
             tw_summary = f"台股昨收漲跌 {change:+.0f} 點 ({pct_change:+.2f}%)"
-        else: tw_summary = "資料不足"
-    except: tw_summary = "無法取得數據"
+            has_data = True
+        else:
+            tw_summary = "台股數據讀取失敗"
+    except: 
+        tw_summary = "無法連線至報價源"
+
     tech_report = "\n".join(signals) if signals else "無特殊異常。"
-    return tech_report, tw_summary
+    return tech_report, tw_summary, has_data
 
 def get_market_news():
     content = ""
     try:
         for url in MARKET_RSS_URLS:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:3]: # 稍微多抓一點讓AI挑選
+            for entry in feed.entries[:3]:
                 if len(entry.title) > 5: content += f"- {entry.title}\n"
     except: pass
     return content
 
 def generate_stock_report():
     raw_news = get_market_news()
-    us_signals, tw_info = get_market_data()
+    us_signals, tw_info, has_data = get_market_data()
     date_str = get_current_date_str()
+    
+    # 🔥 防呆機制：如果完全沒抓到資料，不要讓 AI 瞎掰
+    if not has_data and "無數據" in tw_info:
+        return f"📊 台美股戰報 {date_str}\n\n⚠️ 系統警告：無法取得今日股市報價 (Yahoo Finance 連線異常)。\n請稍後再試，或檢查網路狀態。"
+
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
     prompt = f"""
-    你是嚴謹的台股分析師。請撰寫平日戰報。
-    資料A: {tw_info}
-    資料B: {us_signals}
-    資料C: {raw_news}
+    你是嚴謹的台股分析師。請根據以下「真實數據」撰寫戰報。
+    
+    【嚴格指令】
+    1. **絕對禁止**使用你訓練資料庫中的歷史日期或數據。
+    2. 若數據顯示為「無」或「讀取失敗」，請直接在報告中寫「數據不足」，不要編造數字。
+    
+    資料A (台股表現): {tw_info}
+    資料B (美股異常): {us_signals}
+    資料C (新聞頭條): {raw_news}
+    
     請使用「純文字」格式，不要星號。
+    
     格式範例:
-    📊 台美股戰報 {date_str}
-    【盤勢重點】(一句話)
-    【焦點族群】(點名板塊)
-    【操盤錦囊】(一句話建議)
+    【盤勢重點】
+    (一句話)
+    
+    【焦點族群】
+    (點名板塊)
+    
+    【操盤錦囊】
+    (一句話建議)
     """
-    return model.generate_content(prompt).text
+    
+    # 🔥 關鍵修改：日期由 Python 控制，AI 只負責內容
+    ai_content = model.generate_content(prompt).text
+    final_report = f"📊 台美股戰報 {date_str}\n\n{ai_content}"
+    
+    return final_report
 
 # ==========================================
-# 🌎 任務 1-B：週末操盤手戰報 (新邏輯)
+# 🌎 任務 1-B：週末操盤手戰報
 # ==========================================
 
 def get_weekend_data():
-    """抓取週末需要的指標：期貨、美元、美債、黃金"""
     data_text = ""
-    
-    # 定義代號
     tickers = {
         "S&P500期貨": "ES=F",
         "那斯達克期貨": "NQ=F",
@@ -132,7 +166,6 @@ def get_weekend_data():
     print("正在抓取週末關鍵指標...")
     for name, symbol in tickers.items():
         try:
-            # 抓取最後一筆交易數據
             df = yf.download(symbol, period="5d", interval="1d", progress=False)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
@@ -152,17 +185,12 @@ def get_weekend_data():
 def generate_weekend_report():
     print("正在分析週末情勢 (操盤手模式)...")
     date_str = get_current_date_str()
-    
-    # 1. 抓取數據 (期貨/避險)
     market_data = get_weekend_data()
-    
-    # 2. 抓取新聞 (國際大事)
     raw_news = get_market_news()
 
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
-    # 你的操盤手邏輯 Prompt
     prompt = f"""
     你是專業的操盤手，今天是週末。請根據以下資料，寫出一份「下週開盤前的風向報告」。
     
@@ -182,9 +210,9 @@ def generate_weekend_report():
     
     ✅ 二、看「重大國際新聞」
     (從新聞中篩選會影響資金流向的大事，若無相關新聞則寫無)
-    1. 地緣政治：(是否有中東、俄烏、台海升級消息？關鍵字：空襲、制裁)
-    2. 美國經濟/Fed：(是否有非農、CPI、官員談話？數據強弱對應升降息預期)
-    3. 科技/銀行巨頭：(是否有 Apple/Nvidia/投行 的財測或爆雷)
+    1. 地緣政治：(是否有中東、俄烏、台海升級消息？)
+    2. 美國經濟/Fed：(是否有非農、CPI、官員談話？)
+    3. 科技/銀行巨頭：(是否有財測或爆雷)
     
     ✅ 三、看「資金避險指標」
     (根據 美元指數、美債殖利率、黃金 的漲跌判斷)
@@ -193,10 +221,12 @@ def generate_weekend_report():
     
     【最後總結】
     (一句話給出下週一的操作心態)
-    
-    標題請用：🌎 週末全球盤勢總結 {date_str}
     """
-    return model.generate_content(prompt).text
+    
+    ai_content = model.generate_content(prompt).text
+    final_report = f"🌎 週末全球盤勢總結 {date_str}\n\n{ai_content}"
+    
+    return final_report
 
 # ==========================================
 # 🎧 任務 2：Podcast (含時效過濾)
@@ -218,7 +248,6 @@ def is_fresh_episode(published_struct_time):
     if not published_struct_time: return False
     pub_time = datetime.fromtimestamp(time.mktime(published_struct_time)).replace(tzinfo=pytz.utc)
     now_time = datetime.now(pytz.utc)
-    # 25 小時內的節目才算新的
     if (now_time - pub_time) < timedelta(hours=25):
         return True
     return False
@@ -230,7 +259,7 @@ def get_latest_episode(rss_url):
         
         entry = feed.entries[0]
         if not is_fresh_episode(entry.published_parsed):
-            return None, None, None # 過期不報
+            return None, None, None
             
         title = entry.title
         link = entry.link
@@ -257,7 +286,7 @@ def analyze_podcast(podcast_config):
     role_prompt = podcast_config['prompt_role']
     
     mp3_url, title, link = get_latest_episode(rss)
-    if not mp3_url: return None # 無新節目
+    if not mp3_url: return None
     
     local_file = f"{name}_temp.mp3"
     if not download_mp3(mp3_url, local_file): return None
@@ -269,7 +298,7 @@ def analyze_podcast(podcast_config):
             time.sleep(2)
             audio_file = genai.get_file(audio_file.name)
         
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = f"""
         你是一位專業投資人。請聽這集「{name}」Podcast ({title})。
         {role_prompt}
