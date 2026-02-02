@@ -9,11 +9,28 @@ from datetime import datetime, timedelta
 import pytz
 import time
 import requests
+import sys
 
-# --- 設定環境變數 ---
-GEMINI_API_KEY = "你的_Gemini_API_Key"
-LINE_TOKEN = "你的_Line_Token"
-GROUP_ID = "你的_Group_ID"
+# ==========================================
+# 🔑 設定環境變數 (GitHub 雲端版專用)
+# ==========================================
+# 在 GitHub 上，必須使用 os.environ.get 讀取 Secrets
+# 如果你在本機跑，請確保電腦有設定環境變數，或手動填入(但不建議上傳到 GitHub)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+LINE_TOKEN = os.environ.get("LINE_TOKEN", "")
+GROUP_ID = os.environ.get("GROUP_ID", "")
+
+# 🛠️ 除錯：檢查鑰匙是否讀取成功 (只印出前5碼，避免外洩)
+if not GEMINI_API_KEY:
+    print("❌ 嚴重錯誤：找不到 GEMINI_API_KEY！請檢查 GitHub Secrets 設定。")
+    sys.exit(1) # 直接停止程式
+else:
+    print(f"✅ 讀取到 Gemini Key: {GEMINI_API_KEY[:5]}... (長度: {len(GEMINI_API_KEY)})")
+
+# 去除可能不小心複製到的空白鍵
+GEMINI_API_KEY = GEMINI_API_KEY.strip()
+LINE_TOKEN = LINE_TOKEN.strip()
+GROUP_ID = GROUP_ID.strip()
 
 # 設定時區
 TW_TZ = pytz.timezone('Asia/Taipei')
@@ -22,7 +39,6 @@ TW_TZ = pytz.timezone('Asia/Taipei')
 # 📅 工具函式
 # ==========================================
 def is_weekend():
-    # 5=週六, 6=週日
     weekday = datetime.now(TW_TZ).weekday()
     return weekday >= 5
 
@@ -32,7 +48,7 @@ def get_current_date_str():
     return f"{now.strftime('%Y/%m/%d')} ({weekdays[now.weekday()]})"
 
 # ==========================================
-# 📊 任務 1-A：平日台美股戰報 (嚴格數據版)
+# 📊 任務 1-A：平日台美股戰報
 # ==========================================
 US_WATCHLIST = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOG", "AMZN", "META", "TQQQ", "SOXL"]
 MARKET_RSS_URLS = [
@@ -54,7 +70,7 @@ def calculate_rsi(data, window=14):
 def get_market_data():
     signals = []
     tw_summary = "無數據"
-    has_data = False # 標記是否成功抓到資料
+    has_data = False
 
     print("正在分析市場數據 (平日模式)...")
     
@@ -112,19 +128,19 @@ def generate_stock_report():
     us_signals, tw_info, has_data = get_market_data()
     date_str = get_current_date_str()
     
-    # 🔥 防呆機制：如果完全沒抓到資料，不要讓 AI 瞎掰
     if not has_data and "無數據" in tw_info:
-        return f"📊 台美股戰報 {date_str}\n\n⚠️ 系統警告：無法取得今日股市報價 (Yahoo Finance 連線異常)。\n請稍後再試，或檢查網路狀態。"
+        return f"📊 台美股戰報 {date_str}\n\n⚠️ 系統警告：無法取得今日股市報價 (Yahoo Finance 連線異常)。\n請稍後再試。"
 
     genai.configure(api_key=GEMINI_API_KEY)
+    # 使用穩定版 1.5-flash
     model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
     你是嚴謹的台股分析師。請根據以下「真實數據」撰寫戰報。
     
     【嚴格指令】
-    1. **絕對禁止**使用你訓練資料庫中的歷史日期或數據。
-    2. 若數據顯示為「無」或「讀取失敗」，請直接在報告中寫「數據不足」，不要編造數字。
+    1. **絕對禁止**使用歷史數據。
+    2. 若數據不足，請直接寫「數據不足」。
     
     資料A (台股表現): {tw_info}
     資料B (美股異常): {us_signals}
@@ -143,11 +159,12 @@ def generate_stock_report():
     (一句話建議)
     """
     
-    # 🔥 關鍵修改：日期由 Python 控制，AI 只負責內容
-    ai_content = model.generate_content(prompt).text
-    final_report = f"📊 台美股戰報 {date_str}\n\n{ai_content}"
-    
-    return final_report
+    try:
+        ai_content = model.generate_content(prompt).text
+        return f"📊 台美股戰報 {date_str}\n\n{ai_content}"
+    except Exception as e:
+        print(f"AI 生成失敗: {e}")
+        return None
 
 # ==========================================
 # 🌎 任務 1-B：週末操盤手戰報
@@ -223,10 +240,12 @@ def generate_weekend_report():
     (一句話給出下週一的操作心態)
     """
     
-    ai_content = model.generate_content(prompt).text
-    final_report = f"🌎 週末全球盤勢總結 {date_str}\n\n{ai_content}"
-    
-    return final_report
+    try:
+        ai_content = model.generate_content(prompt).text
+        return f"🌎 週末全球盤勢總結 {date_str}\n\n{ai_content}"
+    except Exception as e:
+        print(f"AI 生成失敗: {e}")
+        return None
 
 # ==========================================
 # 🎧 任務 2：Podcast (含時效過濾)
@@ -248,6 +267,7 @@ def is_fresh_episode(published_struct_time):
     if not published_struct_time: return False
     pub_time = datetime.fromtimestamp(time.mktime(published_struct_time)).replace(tzinfo=pytz.utc)
     now_time = datetime.now(pytz.utc)
+    # 25 小時內的節目才算新的
     if (now_time - pub_time) < timedelta(hours=25):
         return True
     return False
@@ -332,16 +352,18 @@ if __name__ == "__main__":
         try:
             print("--- 執行任務：週末全球盤勢總結 ---")
             report = generate_weekend_report()
-            send_line_push(report)
-            print("✅ 週末戰報發送成功！")
+            if report:
+                send_line_push(report)
+                print("✅ 週末戰報發送成功！")
         except Exception as e:
             print(f"❌ 週末戰報失敗: {e}")
     else:
         try:
             print("--- 執行任務：平日台美股戰報 ---")
             report = generate_stock_report()
-            send_line_push(report)
-            print("✅ 平日戰報發送成功！")
+            if report:
+                send_line_push(report)
+                print("✅ 平日戰報發送成功！")
         except Exception as e:
             print(f"❌ 平日戰報失敗: {e}")
 
