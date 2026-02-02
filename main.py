@@ -18,7 +18,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 LINE_TOKEN = os.environ.get("LINE_TOKEN", "")
 GROUP_ID = os.environ.get("GROUP_ID", "")
 
-# 檢查鑰匙
 if not GEMINI_API_KEY:
     print("❌ 嚴重錯誤：找不到 GEMINI_API_KEY！")
     sys.exit(1)
@@ -29,14 +28,11 @@ GROUP_ID = GROUP_ID.strip()
 TW_TZ = pytz.timezone('Asia/Taipei')
 
 # ==========================================
-# 🧠 AI 核心：自動尋找可用模型 (終極修復)
+# 🧠 AI 核心：模型挑選邏輯 (針對 2.0 Flash 優化)
 # ==========================================
 CURRENT_MODEL_NAME = None
 
 def get_best_model_name():
-    """
-    直接詢問 API 有哪些模型可用，不再瞎猜
-    """
     global CURRENT_MODEL_NAME
     if CURRENT_MODEL_NAME: return CURRENT_MODEL_NAME
 
@@ -51,38 +47,44 @@ def get_best_model_name():
         
         print(f"✅ Google 回報可用模型: {available_models}")
 
-        # 優先順序策略
-        # 1. 找 1.5-flash
-        for m in available_models:
-            if 'gemini-1.5-flash' in m and 'latest' in m:
-                CURRENT_MODEL_NAME = m
-                return m
-        for m in available_models:
-            if 'gemini-1.5-flash' in m: # 任何 flash
-                CURRENT_MODEL_NAME = m
-                return m
+        # 🎯 挑選策略 (優先選 Flash 系列，避開 Pro)
         
-        # 2. 找 gemini-pro (保底)
+        # 1. 首選：Gemini 2.0 Flash (穩定且免費額度高)
         for m in available_models:
-            if 'gemini-pro' in m:
+            if 'gemini-2.0-flash' in m and '001' in m: # 找具體版本
+                CURRENT_MODEL_NAME = m
+                return m
+        for m in available_models:
+            if 'gemini-2.0-flash' in m: # 找通用版本
                 CURRENT_MODEL_NAME = m
                 return m
 
-        # 3. 隨便挑一個能用的
+        # 2. 次選：Gemini Flash Latest (通常指向當前穩定的 Flash)
+        for m in available_models:
+            if 'gemini-flash-latest' in m:
+                CURRENT_MODEL_NAME = m
+                return m
+
+        # 3. 三選：任何名字裡有 flash 的 (除了 2.5，因為 2.5 目前額度少)
+        for m in available_models:
+            if 'flash' in m and '2.5' not in m:
+                CURRENT_MODEL_NAME = m
+                return m
+
+        # 4. 最後不得已才選 Pro (但 Pro 容易 429)
         if available_models:
             CURRENT_MODEL_NAME = available_models[0]
             return available_models[0]
             
     except Exception as e:
-        print(f"❌ 無法列出模型 (可能 API Key 權限問題): {e}")
-        # 如果真的連列表都失敗，只好盲猜一個最標準的
-        return 'gemini-1.5-flash'
+        print(f"❌ 無法列出模型: {e}")
+        return 'gemini-2.0-flash' # 盲猜一個
     
-    return 'gemini-1.5-flash'
+    return 'gemini-2.0-flash'
 
 def get_gemini_response(prompt, audio_file=None):
     model_name = get_best_model_name()
-    # print(f"🤖 使用模型: {model_name}") # 除錯用
+    print(f"🤖 決定使用模型: {model_name}")
 
     try:
         genai.configure(api_key=GEMINI_API_KEY)
