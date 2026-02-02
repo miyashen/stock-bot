@@ -23,58 +23,80 @@ if not GEMINI_API_KEY:
     print("❌ 嚴重錯誤：找不到 GEMINI_API_KEY！")
     sys.exit(1)
 
-# 去除空白
 GEMINI_API_KEY = GEMINI_API_KEY.strip()
 LINE_TOKEN = LINE_TOKEN.strip()
 GROUP_ID = GROUP_ID.strip()
-
-# 設定時區
 TW_TZ = pytz.timezone('Asia/Taipei')
 
 # ==========================================
-# 🧠 AI 核心：模型自動備援機制 (關鍵修復)
+# 🧠 AI 核心：自動尋找可用模型 (終極修復)
 # ==========================================
-def get_gemini_response(prompt, audio_file=None):
+CURRENT_MODEL_NAME = None
+
+def get_best_model_name():
     """
-    嘗試使用不同的模型名稱，避免 404 錯誤
-    順序：gemini-1.5-flash-latest -> gemini-1.5-flash -> gemini-pro
+    直接詢問 API 有哪些模型可用，不再瞎猜
     """
+    global CURRENT_MODEL_NAME
+    if CURRENT_MODEL_NAME: return CURRENT_MODEL_NAME
+
     genai.configure(api_key=GEMINI_API_KEY)
+    print("🔍 正在偵測可用模型清單...")
     
-    # 模型嘗試清單 (優先度由高到低)
-    models_to_try = [
-        'gemini-1.5-flash-latest', # 指向最新的 Flash
-        'gemini-1.5-flash',        # 標準 Flash
-        'gemini-1.5-flash-001',    # 特定版本 Flash
-        'gemini-pro'               # 保底 (1.0版本)
-    ]
+    try:
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+        
+        print(f"✅ Google 回報可用模型: {available_models}")
+
+        # 優先順序策略
+        # 1. 找 1.5-flash
+        for m in available_models:
+            if 'gemini-1.5-flash' in m and 'latest' in m:
+                CURRENT_MODEL_NAME = m
+                return m
+        for m in available_models:
+            if 'gemini-1.5-flash' in m: # 任何 flash
+                CURRENT_MODEL_NAME = m
+                return m
+        
+        # 2. 找 gemini-pro (保底)
+        for m in available_models:
+            if 'gemini-pro' in m:
+                CURRENT_MODEL_NAME = m
+                return m
+
+        # 3. 隨便挑一個能用的
+        if available_models:
+            CURRENT_MODEL_NAME = available_models[0]
+            return available_models[0]
+            
+    except Exception as e:
+        print(f"❌ 無法列出模型 (可能 API Key 權限問題): {e}")
+        # 如果真的連列表都失敗，只好盲猜一個最標準的
+        return 'gemini-1.5-flash'
     
-    last_error = None
+    return 'gemini-1.5-flash'
 
-    for model_name in models_to_try:
-        try:
-            # print(f"🧪 嘗試模型: {model_name} ...") # 除錯用
-            model = genai.GenerativeModel(model_name)
-            
-            if audio_file:
-                # 如果有音檔
-                if model_name == 'gemini-pro':
-                    # gemini-pro (1.0) 不支援聽音檔，跳過
-                    continue
-                response = model.generate_content([prompt, audio_file])
-            else:
-                # 純文字
-                response = model.generate_content(prompt)
-                
-            return response.text # 成功就回傳
-            
-        except Exception as e:
-            # print(f"⚠️ {model_name} 失敗: {e}") # 除錯用
-            last_error = e
-            continue # 試下一個
+def get_gemini_response(prompt, audio_file=None):
+    model_name = get_best_model_name()
+    # print(f"🤖 使用模型: {model_name}") # 除錯用
 
-    print(f"❌ 所有模型都嘗試失敗。最後錯誤: {last_error}")
-    return None
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(model_name)
+        
+        if audio_file:
+            response = model.generate_content([prompt, audio_file])
+        else:
+            response = model.generate_content(prompt)
+            
+        return response.text
+    except Exception as e:
+        print(f"❌ 生成失敗 ({model_name}): {e}")
+        return None
 
 # ==========================================
 # 📅 工具函式
@@ -178,18 +200,14 @@ def generate_stock_report():
     【操盤錦囊】(一句話建議)
     """
     
-    # 使用新的備援機制
     ai_content = get_gemini_response(prompt)
-    
     if ai_content:
         return f"📊 台美股戰報 {date_str}\n\n{ai_content}"
-    else:
-        return None
+    return None
 
 # ==========================================
 # 🌎 任務 1-B：週末操盤手戰報
 # ==========================================
-
 def get_weekend_data():
     data_text = ""
     tickers = {
@@ -235,8 +253,7 @@ def generate_weekend_report():
     ai_content = get_gemini_response(prompt)
     if ai_content:
         return f"🌎 週末全球盤勢總結 {date_str}\n\n{ai_content}"
-    else:
-        return None
+    return None
 
 # ==========================================
 # 🎧 任務 2：Podcast
@@ -298,9 +315,7 @@ def analyze_podcast(podcast_config):
     local_file = f"{name}_temp.mp3"
     if not download_mp3(mp3_url, local_file): return None
 
-    # 使用備援機制
     try:
-        # 上傳檔案
         genai.configure(api_key=GEMINI_API_KEY)
         audio_file = genai.upload_file(path=local_file)
         while audio_file.state.name == "PROCESSING":
@@ -319,10 +334,8 @@ def analyze_podcast(podcast_config):
         💡 達人建議：
         """
         
-        # 呼叫 AI (傳入音檔)
         ai_content = get_gemini_response(prompt, audio_file)
         
-        # 清理
         try: genai.delete_file(audio_file.name)
         except: pass
         try: os.remove(local_file)
@@ -331,7 +344,7 @@ def analyze_podcast(podcast_config):
         return ai_content
 
     except Exception as e:
-        print(f"Podcast 分析流程失敗: {e}")
+        print(f"Podcast 分析失敗: {e}")
         if os.path.exists(local_file): os.remove(local_file)
         return None
 
@@ -343,6 +356,10 @@ def send_line_push(content):
     line_bot_api.push_message(GROUP_ID, TextSendMessage(text=content))
 
 if __name__ == "__main__":
+    
+    # 執行前的檢查：確保至少抓到一個模型
+    get_best_model_name()
+    
     if is_weekend():
         try:
             print("--- 執行任務：週末全球盤勢總結 ---")
